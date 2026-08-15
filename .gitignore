@@ -1,0 +1,24 @@
+# Python 관련 캐시 파일
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 가상 환경
+venv/
+env/
+.venv/
+
+.env
+
+# 생성된 대규모 데이터 파일
+*.csv
+mock_ticket_data.csv
+normalized_ticket_data.csv
+final_secure_ticket_data.csv
+
+# 운영체제 생성 파일
+.DS_Store
+Thumbs.db
+
+neo4j_data/
+neo4j_logs/

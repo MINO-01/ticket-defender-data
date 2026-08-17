@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  neo4j:
+    image: neo4j:5.12.0
+    container_name: ticket-fraud-neo4j
+    ports:
+      - "127.0.0.1:7474:7474" # 외부 접속 차단 (로컬 호스트 전용)
+      - "127.0.0.1:7687:7687" # 외부 접속 차단 (로컬 호스트 전용)
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:?데이터베이스 비밀번호 환경변수가 누락되었습니다}
+    volumes:
+      # 생성한 CSV 파일을 Neo4j 컨테이너 내부로 마운트(연결)
+      - ./final_secure_ticket_data.csv:/var/lib/neo4j/import/final_secure_ticket_data.csv
+      - ./neo4j_data:/data
+      - ./neo4j_logs:/logs

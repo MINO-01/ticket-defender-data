@@ -1,0 +1,12 @@
+colorama==0.4.6
+Faker==40.36.0
+numpy==2.5.1
+pandas==3.0.5
+python-dateutil==2.9.0.post0
+six==1.17.0
+tqdm==4.69.1
+tzdata==2026.3
+python-dotenv==1.0.1
+jellyfish==1.2.1
+argon2-cffi==25.1.0
+neo4j==6.2.0

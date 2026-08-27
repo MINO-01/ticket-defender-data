@@ -1,73 +1,100 @@
+import os
+import time
 import logging
-import random
 import pandas as pd
-from faker import Faker
+import jellyfish
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def generate_mock_ticket_data_chunked(
-    total_records: int, 
-    abuse_ratio: float, 
-    output_file: str,
-    abuse_pool_size: int = 20,
-    chunk_size: int = 10000
+def normalize_addresses(
+    input_filepath: str, 
+    output_filepath: str, 
+    similarity_threshold: float = 0.90
 ) -> None:
     """
-    어뷰징 탐지 시뮬레이션을 위한 예매 모의 데이터를 생성합니다.
-    메모리 초과를 방지하기 위해 Chunk 단위로 나누어 CSV에 바로 병합합니다.
-    
-    Args:
-        total_records: 생성할 전체 예매 데이터 건수
-        abuse_ratio: 전체 데이터 중 어뷰징(중복) 데이터가 차지하는 비율
-        output_file: 결과물을 저장할 CSV 파일 경로
-        abuse_pool_size: 어뷰징 패턴을 형성할 고정된 배송지 및 결제수단 풀의 크기
-        chunk_size: 한 번에 메모리에 올릴 데이터 건수 (기본값 1만 건)
+    배송지 주소 텍스트를 분석하여 유사한 주소를 동일한 문자열로 정규화합니다.
+    대용량 처리 시 OOM 방지를 위해 청크 단위 스트리밍을 수행하며,
+    연산 최적화를 위해 행정구역 단위의 블로킹 기법을 적용합니다.
     """
+    # 입력 및 출력 파일 경로 동일 여부 검증 (덮어쓰기 방지)
+    if os.path.abspath(input_filepath) == os.path.abspath(output_filepath):
+        raise ValueError("입력 파일과 출력 파일의 경로가 같을 수 없습니다.")
 
-    if total_records <= 0 or abuse_pool_size <= 0 or chunk_size <= 0:
-        raise ValueError("생성 건수, 풀 사이즈, 청크 사이즈는 0보다 커야 합니다.")
-    if not (0.0 <= abuse_ratio <= 1.0):
-        raise ValueError("어뷰징 비율은 0.0과 1.0 사이여야 합니다.")
+    logger.info("주소 정규화 프로세스를 시작합니다 (OOM 방지 Chunk 처리 적용).")
     
-    fake = Faker('ko_KR')
-    
-    logger.info(f"어뷰징 패턴 생성을 위한 고정 풀 구성 중 (크기: {abuse_pool_size})")
-    abuse_address_pool = [fake.address() for _ in range(abuse_pool_size)]
-    abuse_payment_pool = [fake.credit_card_number() for _ in range(abuse_pool_size)]
+    if not os.path.exists(input_filepath):
+        logger.error(f"입력 파일을 찾을 수 없습니다: {input_filepath}")
+        return
 
-    # 정확한 비율 검증을 위해 어뷰징 데이터 인덱스 사전 추출
-    abuse_count = int(total_records * abuse_ratio)
-    abuse_indices = set(random.sample(range(1, total_records + 1), abuse_count))
+    start_time = time.time()
     
-    logger.info("모의 예매 데이터 병합 생성을 시작합니다 (메모리 초과 방지 Chunk 처리 적용).")
+    # 청크 간 정규화 상태를 유지하기 위한 전역 캐시
+    address_blocks = {}
+    normalized_address_mapping = {}
+    chunk_size = 10000
+
+    try:
+        # 대규모 데이터 처리를 위한 청크 분할 로드
+        for chunk_idx, chunk in enumerate(pd.read_csv(input_filepath, chunksize=chunk_size)):
+            unique_addresses = chunk['address'].dropna().astype(str).unique()
+            
+            for target_address in unique_addresses:
+                # 기처리된 주소는 캐시를 활용하여 유사도 연산 생략
+                if target_address in normalized_address_mapping:
+                    continue
+                    
+                # 행정구역 단위(시/도, 시/군/구) 블로킹 알고리즘 적용
+                address_parts = target_address.split()
+                region_prefix = " ".join(address_parts[:2]) if len(address_parts) >= 2 else target_address
+                
+                if region_prefix not in address_blocks:
+                    address_blocks[region_prefix] = []
+                    
+                reference_pool = address_blocks[region_prefix]
+                
+                best_match = target_address
+                max_similarity_score = 0.0
+                
+                # Jaro-Winkler 유사도 검사
+                for reference_address in reference_pool:
+                    score = jellyfish.jaro_winkler_similarity(target_address, reference_address)
+                    
+                    # 유사도 임계값을 충족할 경우 기존 정규화 주소로 노드 병합
+                    if score > max_similarity_score and score >= similarity_threshold:
+                        max_similarity_score = score
+                        best_match = reference_address
+
+                # 매칭되는 레퍼런스가 없는 경우 신규 대표 주소로 풀에 등록
+                if best_match == target_address:
+                    reference_pool.append(best_match)
+                
+                # 정규화 결과 캐시 업데이트
+                normalized_address_mapping[target_address] = best_match
+
+            # 현재 청크 데이터에 정규화 결과 매핑
+            chunk['normalized_address'] = chunk['address'].astype(str).map(normalized_address_mapping)
+            
+            # 첫 청크는 파일 생성 이후 청크는 이어쓰기 적용
+            write_mode = 'w' if chunk_idx == 0 else 'a'
+            write_header = True if chunk_idx == 0 else False
+            
+            chunk.to_csv(output_filepath, mode=write_mode, header=write_header, index=False, encoding='utf-8-sig')
+            logger.info(f"청크 정규화 완료: 누적 {(chunk_idx + 1) * chunk_size:,} 건 처리됨")
+            
+    except Exception:
+        logger.exception("데이터 청크 읽기 및 정규화 처리 중 예기치 않은 오류가 발생했습니다.")
+        raise
+
+    elapsed_time = time.time() - start_time
+    logger.info(f"주소 정규화 처리 완료. 총 소요 시간: {elapsed_time:.2f}초")
+    logger.info(f"정규화된 데이터 저장 완료: {output_filepath}")
+
+if __name__ == "__main__":
+    INPUT_FILE_PATH = 'mock_ticket_data.csv'
+    OUTPUT_FILE_PATH = 'normalized_ticket_data.csv'
     
-    chunk_data = []
-    for index in range(1, total_records + 1):
-        # 사전 추출된 인덱스 셋(Set)을 검사하여 어뷰징 데이터 판별
-        is_abuse_target = index in abuse_indices
-        
-        target_address = random.choice(abuse_address_pool) if is_abuse_target else fake.address()
-        target_payment = random.choice(abuse_payment_pool) if is_abuse_target else fake.credit_card_number()
-        
-        chunk_data.append({
-            'account_id': fake.uuid4(),
-            'name': fake.name(),
-            'phone': fake.phone_number(),
-            'address': target_address,
-            'payment_method': target_payment,
-            'ip': fake.ipv4()
-        })
-        
-        if index % chunk_size == 0 or index == total_records:
-            df_chunk = pd.DataFrame(chunk_data)
-            
-            # 첫 번째 청크일 때만 새로 작성하고 헤더를 추가, 이후부터는 이어쓰기
-            write_mode = 'w' if index <= chunk_size else 'a'
-            write_header = True if index <= chunk_size else False
-            
-            df_chunk.to_csv(output_file, mode=write_mode, header=write_header, index=False, encoding='utf-8-sig')
-            logger.info(f"데이터 생성 진행률: {index:,} / {total_records:,} 건 완료")
-            
-            # 파일 기록 후 리스트를 초기화하여 메모리 반환
-            chunk_data = []
+    try:
+        normalize_addresses(INPUT_FILE_PATH, OUTPUT_FILE_PATH)
+    except Exception as e:
+        logger.error(f"주소 정규화 파이프라인 구동 실패: {e}")

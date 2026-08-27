@@ -1,6 +1,7 @@
 import os
 import argparse
 import logging
+import sys
 from dotenv import load_dotenv
 
 from mock_generator import generate_mock_ticket_data_chunked
@@ -22,9 +23,18 @@ def main():
     parser.add_argument("--detect", action="store_true", help="Neo4j에 데이터를 적재하고 암표 조직을 탐지합니다.")
     
     args = parser.parse_args()
-    
+
     if not any([args.all, args.generate, args.normalize, args.hash, args.detect]):
         args.all = True
+
+    if args.all:
+        args.generate = args.normalize = args.hash = args.detect = True
+    if args.generate:
+        args.normalize = args.hash = args.detect = True
+    if args.normalize:
+        args.hash = args.detect = True
+    if args.hash:
+        args.detect = True
 
     MOCK_FILE = "mock_ticket_data.csv"
     NORMALIZED_FILE = "normalized_ticket_data.csv"
@@ -62,6 +72,9 @@ def main():
                 
             fraud_detector = TicketFraudDetector("bolt://localhost:7687", "neo4j", neo4j_password)
             try:
+                if args.generate:
+                    fraud_detector.clear_graph()
+
                 fraud_detector.create_indexes()
                 fraud_detector.load_csv_to_graph()
                 
@@ -77,8 +90,10 @@ def main():
 
     except Neo4jError as db_err:
         logger.error(f"Neo4j 데이터베이스 처리 중 에러 발생: {db_err}")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"파이프라인 실행 중 치명적 오류 발생: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

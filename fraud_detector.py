@@ -33,6 +33,22 @@ class TicketFraudDetector:
         """
         self.driver.close()
 
+    def clear_graph(self) -> None:
+        """
+        전체 파이프라인 재실행 시 랜덤 데이터 중복 누적을 방지하기 위해 그래프를 초기화합니다.
+        메모리 초과 방지를 위해 삭제 작업도 1만 건 단위 배치 트랜잭션으로 처리합니다.
+        """
+        clear_query = """
+        MATCH (n)
+        CALL {
+            WITH n
+            DETACH DELETE n
+        } IN TRANSACTIONS OF 10000 ROWS;
+        """
+        with self.driver.session() as session:
+            session.run(clear_query).consume()
+        logger.info("새로운 데이터 적재를 위해 기존 그래프 데이터가 안전하게 초기화되었습니다.")
+
     def create_indexes(self) -> None:
         """
         10만 건 이상의 대용량 데이터 적재 시 MERGE 연산 병목을 막기 위해 핵심 노드 식별자에 사전 인덱스를 생성합니다.
@@ -45,7 +61,7 @@ class TicketFraudDetector:
         
         with self.driver.session() as session:
             for query in index_queries:
-                session.run(query)
+                session.run(query).consume()
         logger.info("Neo4j 노드 검색 최적화를 위한 인덱스 생성이 완료되었습니다.")
 
     def load_csv_to_graph(self) -> None:
@@ -69,7 +85,7 @@ class TicketFraudDetector:
         """
         
         with self.driver.session() as session:
-            session.run(load_query)
+            session.run(load_query).consume()
         logger.info("CSV 데이터의 노드 및 간선 병합 적재가 완료되었습니다.")
 
     def detect_abnormal_payment_clusters(self, threshold: int = 5) -> List[Dict[str, Any]]:

@@ -1,45 +1,84 @@
+import os
 import argparse
 import logging
-from mock_generator import generate_mock_ticket_data_chunked
+from dotenv import load_dotenv
 
+from mock_generator import generate_mock_ticket_data_chunked
+from address_normalizer import normalize_addresses
+from data_hasher import apply_data_hashing
+from fraud_detector import TicketFraudDetector
+from neo4j.exceptions import Neo4jError
+
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def main() -> None:
-    """
-    티켓 예매 어뷰징 탐지 데이터 파이프라인의 진입점입니다.
-    사용자의 CLI 입력을 해석하고, 모의 데이터 생성부터 비식별화까지의 전체 흐름을 제어합니다.
-    """
-    parser = argparse.ArgumentParser(description="티켓 예매 어뷰징 탐지 파이프라인 컨트롤러")
+def main():
+    parser = argparse.ArgumentParser(description="암표 탐지 데이터 전처리 및 Neo4j 그래프 적재 파이프라인")
+    parser.add_argument("--all", action="store_true", help="데이터 생성부터 탐지까지 전체 파이프라인을 한 번에 실행합니다.")
+    parser.add_argument("--generate", action="store_true", help="10만 건의 모의 예매 데이터를 생성합니다.")
+    parser.add_argument("--normalize", action="store_true", help="생성된 데이터의 주소를 정규화합니다.")
+    parser.add_argument("--hash", action="store_true", help="정규화된 데이터를 비식별화(해싱)하고 원본을 파기합니다.")
+    parser.add_argument("--detect", action="store_true", help="Neo4j에 데이터를 적재하고 암표 조직을 탐지합니다.")
     
-    parser.add_argument('--count', type=int, default=100000, help='생성할 총 데이터 건수 (기본값: 100,000)')
-    parser.add_argument('--abuse-ratio', type=float, default=0.05, help='어뷰징(중복) 데이터 비율 (기본값: 0.05)')
-    parser.add_argument('--pool-size', type=int, default=20, help='어뷰징 패턴 고정 풀 크기 (기본값: 20)')
-    parser.add_argument('--output', type=str, default='mock_ticket_data.csv', help='결과물 CSV 파일 경로 및 이름')
-
     args = parser.parse_args()
+    
+    if not any([args.all, args.generate, args.normalize, args.hash, args.detect]):
+        args.all = True
 
-    logger.info(" 티켓 예매 어뷰징 탐지 데이터 파이프라인 구동 시작 ")
-    logger.info(f"설정된 목표 건수: {args.count:,}건")
-    logger.info(f"설정된 어뷰징 비율: {args.abuse_ratio * 100:.1f}%")
-    logger.info(f"설정된 어뷰징 풀 크기: {args.pool_size}개")
-    
-    # 데이터 생성
-    logger.info("\n--- 모의 데이터 생성 파이프라인 구동 ---")
-    generate_mock_ticket_data_chunked(
-        total_records=args.count, 
-        abuse_ratio=args.abuse_ratio,
-        output_file=args.output,
-        abuse_pool_size=args.pool_size,
-        chunk_size=10000
-    )
-    logger.info(f"데이터 생성 완료: 모의 데이터가 '{args.output}'에 저장되었습니다.\n")
-    
-    # TODO: Jaro-Winkler 기반 배송지 주소 문자열 정규화 모듈 연동 예정
-    
-    # TODO: Argon2id 기반 데이터 단방향 암호화 모듈 연동 예정
+    MOCK_FILE = "mock_ticket_data.csv"
+    NORMALIZED_FILE = "normalized_ticket_data.csv"
+    SECURE_FILE = "final_secure_ticket_data.csv"
 
-    logger.info(" 파이프라인 처리가 성공적으로 종료되었습니다. ")
+    logger.info("=== 암표 탐지 파이프라인 에이전트를 가동합니다 ===")
+
+    try:
+        if args.all or args.generate:
+            logger.info("대규모 모의 데이터 생성을 시작합니다")
+            generate_mock_ticket_data_chunked(
+                total_records=100000, 
+                abuse_ratio=0.05, 
+                output_file=MOCK_FILE
+            )
+
+        if args.all or args.normalize:
+            logger.info("Jaro-Winkler 기반 주소 정규화를 시작합니다")
+            normalize_addresses(MOCK_FILE, NORMALIZED_FILE)
+
+        if args.all or args.hash:
+            logger.info("로컬 메모리 비식별화 및 평문 파기를 시작합니다")
+            apply_data_hashing(
+                input_filepath=NORMALIZED_FILE, 
+                output_filepath=SECURE_FILE, 
+                columns_to_hash=['phone', 'payment_method', 'normalized_address'],
+                use_fast_mock_mode=True
+            )
+
+        if args.all or args.detect:
+            logger.info("Neo4j 그래프 DB 적재 및 어뷰징 탐지를 시작합니다.")
+            neo4j_password = os.getenv("NEO4J_PASSWORD")
+            if not neo4j_password:
+                raise ValueError(".env 파일에 NEO4J_PASSWORD가 설정되지 않았습니다.")
+                
+            fraud_detector = TicketFraudDetector("bolt://localhost:7687", "neo4j", neo4j_password)
+            try:
+                fraud_detector.create_indexes()
+                fraud_detector.load_csv_to_graph()
+                
+                suspicious_clusters = fraud_detector.detect_abnormal_payment_clusters(threshold=5)
+                if suspicious_clusters:
+                    logger.info(f"암표 의심 군집 {len(suspicious_clusters)}건이 성공적으로 적발되었습니다!")
+                else:
+                    logger.info("탐지된 이상 결제 군집이 없습니다.")
+            finally:
+                fraud_detector.close()
+
+        logger.info("=== 모든 파이프라인 처리가 성공적으로 종료되었습니다 ===")
+
+    except Neo4jError as db_err:
+        logger.error(f"Neo4j 데이터베이스 처리 중 에러 발생: {db_err}")
+    except Exception as e:
+        logger.error(f"파이프라인 실행 중 치명적 오류 발생: {e}")
 
 if __name__ == "__main__":
     main()

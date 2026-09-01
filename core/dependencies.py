@@ -33,11 +33,11 @@ def get_fraud_detector() -> TicketFraudDetector:
                     logger.error("데이터베이스 인증 정보(NEO4J_PASSWORD)가 누락되었습니다.")
                     raise HTTPException(status_code=500, detail="Internal Server Configuration Error")
         
-            try:
-                _detector_instance = TicketFraudDetector(neo4j_uri, neo4j_user, neo4j_password)
-                logger.info("Neo4j 데이터베이스 커넥션 풀이 성공적으로 초기화되었습니다.")
-            except Exception as e:
-                logger.exception(f"Neo4j 커넥션 풀 생성 중 오류 발생: {e}")
-                raise HTTPException(status_code=500, detail="Database Connection Failed")
+                try:
+                    _detector_instance = TicketFraudDetector(neo4j_uri, neo4j_user, neo4j_password)
+                    logger.info("Neo4j 데이터베이스 커넥션 풀이 성공적으로 초기화되었습니다.")
+                except Exception as e:
+                    logger.exception(f"Neo4j 커넥션 풀 생성 중 오류 발생: {e}")
+                    raise HTTPException(status_code=500, detail="Database Connection Failed")
             
     return _detector_instance

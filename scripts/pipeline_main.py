@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="암표 탐지 데이터 전처리 및 Neo4j 그래프 적재 파이프라인")
     parser.add_argument("--all", action="store_true", help="데이터 생성부터 탐지까지 전체 파이프라인을 한 번에 실행합니다.")
-    parser.add_argument("--generate", action="store_true", help="10만 건의 모의 예매 데이터를 생성합니다.")
+    parser.add_argument("--generate", action="store_true", help="모의 예매 데이터를 생성합니다. (기본값: 1만 건)")
     parser.add_argument("--normalize", action="store_true", help="생성된 데이터의 주소를 정규화합니다.")
     parser.add_argument("--hash", action="store_true", help="정규화된 데이터를 비식별화(해싱)하고 원본을 파기합니다.")
     parser.add_argument("--detect", action="store_true", help="Neo4j에 데이터를 적재하고 암표 조직을 탐지합니다.")

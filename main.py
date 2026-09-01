@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routes import router as cluster_router
-from core.dependencies import _detector_instance
+from core import dependencies
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -14,9 +14,9 @@ async def lifespan(app: FastAPI):
     """서버 라이프사이클 관리: 시작 및 종료 시 자원 할당/반환을 제어합니다."""
     yield
     # 서버 종료 시 DB 커넥션 안전 반환
-    if _detector_instance:
-        _detector_instance.close()
-        logger.info ("Neo4j 데이터베이스 커넥션이 안전하게 종료되었습니다.")
+    if dependencies._detector_instance:
+        dependencies._detector_instance.close()
+        logger.info("Neo4j 데이터베이스 커넥션이 안전하게 종료되었습니다.")
 
 app = FastAPI(
     title="Ticket Fraud Analytics API", 

@@ -88,6 +88,31 @@ class TicketFraudDetector:
             session.run(load_query).consume()
         logger.info("CSV 데이터의 노드 및 간선 병합 적재가 완료되었습니다.")
 
+    def load_json_to_graph(self, tickets: list) -> None:
+        """
+        Spring Boot로부터 수신한 실시간 JSON(List) 데이터를 Neo4j 그래프로 변환하여 적재합니다.
+        메모리 초과 방지를 위해 1만 건씩 트랜잭션을 쪼개서 넣고, 중복 생성을 막기 위해 MERGE를 사용합니다.
+        """
+        load_query = """
+        UNWIND $tickets AS row
+        CALL {
+            WITH row
+            MERGE (acc:Account {id: row.accountId})
+            MERGE (pay:Payment {hash: row.paymentHash})
+            MERGE (addr:Address {hash: row.addressHash})
+
+            MERGE (acc)-[:USED_PAYMENT]->(pay)
+            MERGE (acc)-[:DELIVERED_TO]->(addr)
+        } IN TRANSACTIONS OF 10000 ROWS;
+        """
+        
+        ticket_dicts = [ticket.model_dump(by_alias=True) for ticket in tickets]
+        
+        with self.driver.session() as session:
+            session.run(load_query, tickets=ticket_dicts).consume()
+            
+        logger.info(f"실시간 티켓 데이터 {len(ticket_dicts)}건의 노드 및 간선 병합 적재가 완료되었습니다.")
+
     def detect_abnormal_payment_clusters(self, threshold: int = 5) -> List[Dict[str, Any]]:
         """
         단일 결제 수단에 다수의 예매 계정이 집중된 어뷰징 군집을 탐지합니다.

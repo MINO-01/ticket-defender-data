@@ -1,28 +1,26 @@
 import logging
 from fastapi import APIRouter, Depends, Query
-from schemas.response import ClusterResponse
+from schemas.models import ClusterResponse, AnalysisRequest
 from core.dependencies import get_fraud_detector
 from fraud_detector import TicketFraudDetector
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-@router.get("/clusters/payment", response_model=ClusterResponse)
-def get_payment_clusters(
+@router.post("/clusters/payment", response_model=ClusterResponse)
+def analyze_payment_clusters(
+    request: AnalysisRequest,
     threshold: int = Query(default=5, ge=2, description="군집 탐지 최소 중복 계정 수"),
     detector: TicketFraudDetector = Depends(get_fraud_detector)
 ):
     """
-    단일 결제 수단에 다수의 계정이 집중된 어뷰징 군집을 조회합니다.
-    
-    Args:
-        threshold: 이상 탐지로 간주할 최소 연결 계정 수 (기본값: 5)
-        detector: 의존성 주입된 DB 제어 객체
-        
-    Returns:
-        ClusterResponse: 상태 메시지와 탐지된 군집 리스트를 포함한 JSON 응답
+    [POST] Spring Boot로부터 수신한 대량의 예매 데이터를 Neo4j에 적재하고,
+    단일 결제 수단에 다수의 계정이 집중된 어뷰징 군집을 조회하여 반환합니다.
     """
-    logger.info(f"결제 수단 기준 암표 군집 탐지 요청 수신 (threshold: {threshold})")
+    logger.info(f"Spring Boot로부터 {len(request.tickets)}건의 분석 요청 수신 (threshold: {threshold})")
+    
+    detector.load_json_to_graph(request.tickets)
+    
     clusters = detector.detect_abnormal_payment_clusters(threshold=threshold)
     
     return ClusterResponse(

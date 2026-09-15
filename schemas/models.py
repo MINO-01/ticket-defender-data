@@ -1,6 +1,14 @@
 from pydantic import BaseModel, Field
 from typing import List
 
+class TicketHashData(BaseModel):
+    account_id: str = Field(..., alias="accountId")
+    payment_hash: str = Field(..., alias="paymentHash")
+    address_hash: str = Field(..., alias="addressHash")
+
+class AnalysisRequest(BaseModel):
+    tickets: List[TicketHashData]
+
 class ClusterData(BaseModel):
     """단일 암표 의심 군집 데이터 규격"""
     payment_hash: str = Field(..., description="비식별화된 결제 수단 해시값")

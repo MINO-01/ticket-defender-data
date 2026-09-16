@@ -107,11 +107,14 @@ class TicketFraudDetector:
         """
         
         ticket_dicts = [ticket.model_dump(by_alias=True) for ticket in tickets]
+
+        chunk_size = 10000
         
         with self.driver.session() as session:
-            session.run(load_query, tickets=ticket_dicts).consume()
-            
-        logger.info(f"실시간 티켓 데이터 {len(ticket_dicts)}건의 노드 및 간선 병합 적재가 완료되었습니다.")
+            for i in range(0, len(ticket_dicts), chunk_size):
+                chunk = ticket_dicts[i : i + chunk_size]
+                session.run(load_query, tickets=chunk).consume()
+                logger.info(f"실시간 티켓 데이터 청크 적재 완료: {i + len(chunk)} / {len(ticket_dicts)} 건")
 
     def detect_abnormal_payment_clusters(self, threshold: int = 5) -> List[Dict[str, Any]]:
         """

@@ -38,9 +38,8 @@ async def get_graph_service() -> GraphService:
                     raise HTTPException(status_code=500, detail="Internal Server Configuration Error")
                 
                 try:
-                    # GraphService 인스턴스 생성 (Phase 1: 빈 껍데기 상태)
                     _graph_service_instance = GraphService(uri, user, pwd)
-                    logger.info("GraphService(Neo4j) 커넥션 풀이 성공적으로 초기화되었습니다.")
+                    logger.info("GraphService Phase 1 셸이 성공적으로 초기화되었습니다.")
                 except Exception as e:
                     logger.exception(f"GraphService 커넥션 풀 생성 중 오류 발생: {e}")
                     raise HTTPException(status_code=500, detail="Database Connection Failed")

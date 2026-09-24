@@ -1,43 +1,68 @@
 import os
 import logging
-import threading
+import asyncio
 from fastapi import HTTPException
-from fraud_detector import TicketFraudDetector
+from services.graph_service import GraphService
+from services.vlm_service import VLMService
 
 logger = logging.getLogger(__name__)
 
-_detector_instance = None
-_lock = threading.Lock()
+_graph_service_instance = None
+_vlm_service_instance = None
+_lock = asyncio.Lock()
 
-def get_fraud_detector() -> TicketFraudDetector:
+async def get_graph_service() -> GraphService:
     """
-    FastAPI 의존성 주입을 위한 TicketFraudDetector 싱글톤 인스턴스를 반환합니다.
-    최초 호출 시에만 데이터베이스 커넥션을 생성하여 리소스를 최적화합니다.
+    FastAPI 의존성 주입을 위한 GraphService 비동기 싱글톤 인스턴스를 반환합니다.
+    
+    서버 기동 시 최초 호출에만 Neo4j 데이터베이스 커넥션을 생성하여 리소스를 최적화하며,
+    Double-Checked Locking 패턴과 asyncio.Lock을 결합하여 동시성 이슈를 완벽히 제어합니다.
 
     Returns:
-        TicketFraudDetector: 초기화된 그래프 데이터베이스 제어 객체
+        GraphService: 초기화된 비동기 그래프 데이터베이스 제어 객체
     
     Raises:
-        HTTPException: 데이터베이스 환경변수가 누락된 경우 500 에러 발생
+        HTTPException: 데이터베이스 환경변수가 누락되거나 커넥션 생성 실패 시 500 에러 발생
     """
-    global _detector_instance
+    global _graph_service_instance
     
-    if _detector_instance is None:
-        with _lock:
-            if _detector_instance is None:
-                neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-                neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-                neo4j_password = os.getenv("NEO4J_PASSWORD")
-        
-                if not neo4j_password:
-                    logger.error("데이터베이스 인증 정보(NEO4J_PASSWORD)가 누락되었습니다.")
+    if _graph_service_instance is None:
+        async with _lock:
+            if _graph_service_instance is None:
+                uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+                user = os.getenv("NEO4J_USER", "neo4j")
+                pwd = os.getenv("NEO4J_PASSWORD")
+                
+                if not pwd:
+                    logger.error("보안 경고: 데이터베이스 인증 정보(NEO4J_PASSWORD)가 누락되었습니다.")
                     raise HTTPException(status_code=500, detail="Internal Server Configuration Error")
-        
+                
                 try:
-                    _detector_instance = TicketFraudDetector(neo4j_uri, neo4j_user, neo4j_password)
-                    logger.info("Neo4j 데이터베이스 커넥션 풀이 성공적으로 초기화되었습니다.")
+                    # GraphService 인스턴스 생성 (Phase 1: 빈 껍데기 상태)
+                    _graph_service_instance = GraphService(uri, user, pwd)
+                    logger.info("GraphService(Neo4j) 커넥션 풀이 성공적으로 초기화되었습니다.")
                 except Exception as e:
-                    logger.exception(f"Neo4j 커넥션 풀 생성 중 오류 발생: {e}")
+                    logger.exception(f"GraphService 커넥션 풀 생성 중 오류 발생: {e}")
                     raise HTTPException(status_code=500, detail="Database Connection Failed")
-            
-    return _detector_instance
+                    
+    return _graph_service_instance
+
+async def get_vlm_service() -> VLMService:
+    """
+    FastAPI 의존성 주입을 위한 VLMService 비동기 싱글톤 인스턴스를 반환합니다.
+    
+    외부 AI API 호출을 담당하는 서비스를 관리하며,
+    메모리 낭비를 막기 위해 단일 객체로 유지합니다.
+
+    Returns:
+        VLMService: VLM 외부 API 비동기 통신을 담당하는 서비스 객체
+    """
+    global _vlm_service_instance
+    
+    if _vlm_service_instance is None:
+        async with _lock:
+            if _vlm_service_instance is None:
+                _vlm_service_instance = VLMService()
+                logger.info("VLMService 싱글톤 객체가 성공적으로 초기화되었습니다.")
+                
+    return _vlm_service_instance

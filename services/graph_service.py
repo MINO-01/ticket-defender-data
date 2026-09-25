@@ -1,14 +1,22 @@
 import logging
+import uuid
 from typing import List, Dict, Any
 from neo4j import AsyncGraphDatabase
+from schemas.dto import MacroClusterData
 
 logger = logging.getLogger(__name__)
 
 class GraphService:
+    """
+    Neo4j 데이터베이스와의 비동기 통신을 담당하는 서비스 클래스입니다.
+    대용량 티켓 데이터 적재 및 GDS 조직망 탐지 알고리즘을 수행합니다.
+    """
     def __init__(self, uri: str, user: str, password: str) -> None:
+        """GraphService 객체를 초기화하고 Neo4j 비동기 드라이버 커넥션 풀을 생성합니다."""
         self.driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
 
     async def close(self) -> None:
+        """Neo4j 비동기 드라이버 커넥션을 안전하게 종료하고 자원을 반환합니다."""
         await self.driver.close()
 
     async def load_json_to_graph(self, tickets: list) -> None:
@@ -37,28 +45,29 @@ class GraphService:
         async with self.driver.session() as session:
             for i in range(0, len(ticket_dicts), chunk_size):
                 chunk = ticket_dicts[i : i + chunk_size]
-                await session.run(load_query, tickets=chunk)
+                result = await session.run(load_query, tickets=chunk)
+                await result.consume()
                 logger.info(f"[GraphService] Async 다차원 청크 적재 완료: {i + len(chunk)} / {len(ticket_dicts)} 건")
 
-    async def detect_macro_clusters(self, threshold: int = 5) -> List[Dict[str, Any]]:
+    async def detect_macro_clusters(self, threshold: int = 5) -> List[MacroClusterData]:
         """
         [GDS 알고리즘] Neo4j WCC(Weakly Connected Components)를 활용한 거대 조직망 색출
         결제수단, 기기, IP 중 하나라도 연결된 계정들을 거대한 하나의 클러스터로 묶어냅니다.
         """
-        drop_query = "CALL gds.graph.drop('macro_network', false) YIELD graphName;"
+        graph_name = f"macro_network_{uuid.uuid4().hex}"
         
-        # 2. 다차원 엣지를 포함한 분석용 그래프 메모리 투영
-        project_query = """
+        drop_query = f"CALL gds.graph.drop('{graph_name}', false) YIELD graphName;"
+        
+        project_query = f"""
         CALL gds.graph.project(
-            'macro_network',
+            '{graph_name}',
             ['Account', 'Payment', 'Device', 'IP'],
             ['USED_PAYMENT', 'USED_DEVICE', 'USED_IP']
         ) YIELD graphName;
         """
         
-        # 3. WCC 알고리즘 실행 및 군집화된 계정 도출
-        wcc_query = """
-        CALL gds.wcc.stream('macro_network')
+        wcc_query = f"""
+        CALL gds.wcc.stream('{graph_name}')
         YIELD nodeId, componentId
         WITH gds.util.asNode(nodeId) AS n, componentId
         WHERE 'Account' IN labels(n)
@@ -71,15 +80,18 @@ class GraphService:
         
         async with self.driver.session() as session:
             try:
-                await session.run(drop_query)
-                await session.run(project_query)
+                drop_res = await session.run(drop_query)
+                await drop_res.consume()
+                
+                proj_res = await session.run(project_query)
+                await proj_res.consume()
                 
                 result = await session.run(wcc_query, threshold=threshold)
                 records = await result.data()
-                return records
+                return [MacroClusterData(**record) for record in records]
             except Exception as e:
                 logger.error(f"[GraphService] GDS 분석 중 오류 발생: {e}")
                 raise
             finally:
-                # 분석이 끝나면 반드시 램(RAM) 자원 반환
-                await session.run(drop_query)
+                final_drop_res = await session.run(drop_query)
+                await final_drop_res.consume()

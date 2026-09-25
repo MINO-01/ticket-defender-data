@@ -2,6 +2,10 @@ import os
 import logging
 import asyncio
 from fastapi import HTTPException
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from services.graph_service import GraphService
 from services.vlm_service import VLMService
 
@@ -13,9 +17,9 @@ _lock = asyncio.Lock()
 
 async def get_graph_service() -> GraphService:
     """
-    FastAPI 의존성 주입을 위한 GraphService 비동기 싱글톤 인스턴스를 반환합니다.
+    FastAPI 의존성 주입(DI)을 위한 GraphService 비동기 싱글톤 인스턴스를 반환합니다.
     
-    서버 기동 시 최초 호출에만 Neo4j 데이터베이스 커넥션을 생성하여 리소스를 최적화하며,
+    서버 기동 시 최초 호출에만 Neo4j 데이터베이스 커넥션 풀을 생성하여 리소스를 최적화하며,
     Double-Checked Locking 패턴과 asyncio.Lock을 결합하여 동시성 이슈를 완벽히 제어합니다.
 
     Returns:
@@ -39,7 +43,7 @@ async def get_graph_service() -> GraphService:
                 
                 try:
                     _graph_service_instance = GraphService(uri, user, pwd)
-                    logger.info("GraphService Phase 1 셸이 성공적으로 초기화되었습니다.")
+                    logger.info("GraphService(Neo4j) 비동기 커넥션 풀이 성공적으로 초기화되었습니다.")
                 except Exception as e:
                     logger.exception(f"GraphService 커넥션 풀 생성 중 오류 발생: {e}")
                     raise HTTPException(status_code=500, detail="Database Connection Failed")

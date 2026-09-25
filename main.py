@@ -9,6 +9,8 @@ from core import dependencies
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+logging.getLogger("neo4j").setLevel(logging.WARNING)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield

@@ -5,6 +5,7 @@ import base64
 from typing import Dict, Any
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class VLMService:
         {"zone": "A", "row": "10", "seat": "15"}
         """
 
-        image_bytes = base64.b64decode(base64_image)
+        image_bytes = base64.b64decode(base64_image, validate=True)
 
         contents = [
             prompt,
@@ -57,8 +58,11 @@ class VLMService:
             except asyncio.TimeoutError:
                 logger.warning(f"[VLMService] VLM API 타임아웃 발생 (시도: {attempt}/{max_retries})")
             except json.JSONDecodeError as e:
-                logger.error(f"[VLMService] VLM 환각 발생 - JSON 파싱 실패: {e} | 응답: {response.text}")
-            except Exception as e:
+                truncated_response = response.text[:100].replace('\n', ' ')
+                logger.error(f"[VLMService] VLM 환각 발생 - JSON 파싱 실패: {e} | 응답: {truncated_response}")
+            except genai_errors.APIError as e:
+                if e.code not in (429, 500, 502, 503, 504):
+                    raise
                 logger.warning(f"[VLMService] VLM API 호출 오류: {e} (시도: {attempt}/{max_retries})")
 
             if attempt < max_retries:

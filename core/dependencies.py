@@ -52,20 +52,25 @@ async def get_graph_service() -> GraphService:
 
 async def get_vlm_service() -> VLMService:
     """
-    FastAPI 의존성 주입을 위한 VLMService 비동기 싱글톤 인스턴스를 반환합니다.
-    
-    외부 AI API 호출을 담당하는 서비스를 관리하며,
-    메모리 낭비를 막기 위해 단일 객체로 유지합니다.
-
-    Returns:
-        VLMService: VLM 외부 API 비동기 통신을 담당하는 서비스 객체
+    [Track 2] FastAPI 의존성 주입(DI)을 위한 VLMService 비동기 싱글톤 인스턴스를 반환합니다.
+    외부 AI API 호출 시 메모리 누수를 막기 위해 단일 객체로 유지합니다.
     """
     global _vlm_service_instance
     
     if _vlm_service_instance is None:
         async with _lock:
             if _vlm_service_instance is None:
-                _vlm_service_instance = VLMService()
-                logger.info("VLMService 싱글톤 객체가 성공적으로 초기화되었습니다.")
+                api_key = os.getenv("GEMINI_API_KEY")
+                
+                if not api_key:
+                    logger.error("보안 경고: 외부 AI API 키(GEMINI_API_KEY)가 누락되었습니다.")
+                    raise HTTPException(status_code=500, detail="VLM Configuration Error")
+                
+                try:
+                    _vlm_service_instance = VLMService(api_key=api_key)
+                    logger.info("VLMService(Gemini) 비동기 싱글톤 객체가 성공적으로 초기화되었습니다.")
+                except Exception as e:
+                    logger.exception(f"VLMService 초기화 중 오류 발생: {e}")
+                    raise HTTPException(status_code=500, detail="VLM Service Initialization Failed")
                 
     return _vlm_service_instance

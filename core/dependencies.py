@@ -45,7 +45,7 @@ async def get_graph_service() -> GraphService:
                     _graph_service_instance = GraphService(uri, user, pwd)
                     logger.info("GraphService(Neo4j) 비동기 커넥션 풀이 성공적으로 초기화되었습니다.")
                 except Exception as e:
-                    logger.exception(f"GraphService 커넥션 풀 생성 중 오류 발생: {e}")
+                    logger.error("GraphService 커넥션 풀 생성 중 오류 발생: %s", type(e).__name__)
                     raise HTTPException(status_code=500, detail="Database Connection Failed")
                     
     return _graph_service_instance

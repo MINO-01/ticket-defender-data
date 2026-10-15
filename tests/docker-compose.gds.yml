@@ -1,0 +1,14 @@
+services:
+  neo4j:
+    image: neo4j:5.12.0
+    environment:
+      NEO4J_AUTH: neo4j/${TD_GDS_TEST_PASSWORD:?}
+      NEO4J_dbms_security_procedures_unrestricted: gds.*
+      NEO4J_dbms_security_procedures_allowlist: gds.*
+    volumes:
+      - type: bind
+        source: ${TD_GDS_TEST_JAR:?}
+        target: /plugins/graph-data-science.jar
+        read_only: true
+    ports:
+      - "127.0.0.1::7687"

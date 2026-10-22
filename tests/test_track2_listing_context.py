@@ -5,6 +5,7 @@ from io import BytesIO, StringIO
 import json
 import logging
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -13,9 +14,13 @@ from google.genai import errors as genai_errors
 from PIL import Image, ImageDraw
 
 from core.dependencies import get_vlm_service
+from core.vlm_errors import VLMBodyTooLarge, VLMProblem
 from core.vlm_security import VLMPreBodyGate
 from main import app
-from services.image_validation import ValidatedImage
+from services import image_validation
+from services.image_validation import (
+    LEGACY_MAX_BASE64_LENGTH, LEGACY_MAX_IMAGE_BYTES, ValidatedImage, validate_image_in_thread,
+)
 from services.vlm_service import (
     GeminiProvider, PermanentProviderError, ProviderResult, TemporaryProviderError, VLMService,
 )
@@ -195,6 +200,27 @@ class Track2HttpTests(unittest.TestCase):
         with patch.dict(os.environ, {"VLM_EXTERNAL_CALLS_ENABLED": "true", "VLM_PROVIDER": "gemini", "GEMINI_API_KEY": ""}):
             self.assertEqual(self.post().json()["code"], "VLM_CONFIGURATION_ERROR")
 
+    def test_provider_initialization_logs_only_exception_class(self):
+        app.dependency_overrides.clear()
+        secret_message = "PRIVATE_PROVIDER_RESPONSE_OR_IMAGE"
+        fake_key = "FAKE_API_KEY_SENTINEL"
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        logger = logging.getLogger("core.dependencies")
+        logger.addHandler(handler)
+        try:
+            with patch.dict(os.environ, {
+                "VLM_EXTERNAL_CALLS_ENABLED": "true", "VLM_PROVIDER": "gemini",
+                "GEMINI_API_KEY": fake_key,
+            }), patch("core.dependencies.GeminiProvider", side_effect=RuntimeError(secret_message)):
+                response = self.post()
+        finally:
+            logger.removeHandler(handler)
+        self.assertEqual(response.json()["code"], "VLM_CONFIGURATION_ERROR")
+        self.assertIn("RuntimeError", stream.getvalue())
+        for private in (secret_message, fake_key, SECRET, request_body()["imageBase64"]):
+            self.assertNotIn(private, stream.getvalue() + response.text)
+
     def test_bad_base64_mime_digest_image_and_limits(self):
         cases = [
             ({**request_body(), "imageBase64": "?"}, 400, "INVALID_BASE64"),
@@ -234,6 +260,32 @@ class Track2HttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(set(response.json()), {"status", "message", "parsed_data"})
         self.assertEqual(response.json()["parsed_data"], {"zone": "A", "row": "10", "seat": "15"})
+
+    def test_both_routes_validate_in_worker_thread(self):
+        original = image_validation.validate_image
+        worker_checks = []
+
+        def record_worker(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                worker_checks.append(True)
+            else:
+                worker_checks.append(False)
+            return original(*args, **kwargs)
+
+        with patch("services.image_validation.validate_image", side_effect=record_worker):
+            self.assertEqual(self.post().status_code, 200)
+            self.fake = FakeProvider(provider_result({"zone": "A", "row": "10", "seat": "15"}))
+            app.dependency_overrides[get_vlm_service] = lambda: VLMService(self.fake, backoff_seconds=0)
+            data = image_bytes()
+            response = self.post(
+                {"image_base64": base64.b64encode(data).decode(), "mime_type": "image/png"},
+                path="/api/v1/parse/ticket-image",
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["parsed_data"]["seat"], "15")
+        self.assertEqual(worker_checks, [True, True])
 
     def test_seat_token_quote_accepts_korean_suffix_but_not_different_number(self):
         self.set_fields(fields(seat=found("15", "15번 좌석")))
@@ -337,6 +389,92 @@ class ProviderServiceTests(unittest.IsolatedAsyncioTestCase):
                     await adapter.generate(self.image, "synthetic prompt", object)
 
 
+class ImageValidationWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def validate(self):
+        return await validate_image_in_thread(
+            base64.b64encode(image_bytes()).decode(), "image/png",
+            max_base64_length=LEGACY_MAX_BASE64_LENGTH, max_bytes=LEGACY_MAX_IMAGE_BYTES,
+        )
+
+    async def test_event_loop_remains_responsive_and_slot_wait_is_bounded(self):
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        release = threading.Event()
+        active = 0
+        peak = 0
+        result = ValidatedImage(image_bytes(), "image/png", "0" * 64, 80, 40)
+
+        def slow_validation(*args, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            loop.call_soon_threadsafe(started.set)
+            try:
+                release.wait(2)
+                return result
+            finally:
+                active -= 1
+
+        with patch("services.image_validation.validate_image", side_effect=slow_validation):
+            first = asyncio.create_task(self.validate())
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                await asyncio.wait_for(asyncio.sleep(0.01), 0.1)
+                began = loop.time()
+                with self.assertRaises(VLMProblem) as busy:
+                    await self.validate()
+                self.assertEqual(busy.exception.code, "IMAGE_VALIDATION_BUSY")
+                self.assertLess(loop.time() - began, 0.3)
+                self.assertEqual(peak, 1)
+            finally:
+                release.set()
+                await first
+            self.assertIs(await self.validate(), result)
+            self.assertEqual(peak, 1)
+
+    async def test_validation_exception_releases_slot(self):
+        failure = VLMProblem(422, "INVALID_IMAGE", "Invalid image", "Image cannot be decoded")
+        with patch("services.image_validation.validate_image", side_effect=failure):
+            with self.assertRaises(VLMProblem) as caught:
+                await self.validate()
+            self.assertEqual(caught.exception.code, "INVALID_IMAGE")
+        result = await self.validate()
+        self.assertEqual((result.width, result.height), (80, 40))
+
+    async def test_cancelled_request_keeps_slot_until_worker_finishes(self):
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        release = threading.Event()
+        result = ValidatedImage(image_bytes(), "image/png", "0" * 64, 80, 40)
+
+        def slow_validation(*args, **kwargs):
+            loop.call_soon_threadsafe(started.set)
+            release.wait(2)
+            return result
+
+        with patch("services.image_validation.validate_image", side_effect=slow_validation):
+            first = asyncio.create_task(self.validate())
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                first.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await first
+                with self.assertRaises(VLMProblem) as busy:
+                    await self.validate()
+                self.assertEqual(busy.exception.code, "IMAGE_VALIDATION_BUSY")
+            finally:
+                release.set()
+            for _ in range(30):
+                try:
+                    self.assertIs(await self.validate(), result)
+                    break
+                except VLMProblem as error:
+                    self.assertEqual(error.code, "IMAGE_VALIDATION_BUSY")
+                    await asyncio.sleep(0.01)
+            else:
+                self.fail("validation slot was not released after cancellation")
+
+
 class PreBodyGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_unauthenticated_request_never_consumes_body(self):
         calls = {"receive": 0, "app": 0}
@@ -374,8 +512,91 @@ class PreBodyGateTests(unittest.IsolatedAsyncioTestCase):
         scope = {"type": "http", "method": "POST", "path": "/api/v1/parse/listing-context",
                  "headers": [(b"x-td-internal-key", SECRET.encode())]}
         with patch.dict(os.environ, {"VLM_ENABLED": "true", "VLM_INTERNAL_SHARED_SECRET": SECRET}):
-            await VLMPreBodyGate(downstream)(scope, receive, send)
-        self.assertEqual(sent[0]["status"], 413)
+            with self.assertRaises(VLMBodyTooLarge) as failure:
+                await VLMPreBodyGate(downstream)(scope, receive, send)
+        self.assertEqual(failure.exception.status_code, 413)
+        self.assertEqual(sent, [])
+
+
+class AppStreamingBodyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.env = patch.dict(os.environ, {
+            "VLM_ENABLED": "true", "VLM_INTERNAL_SHARED_SECRET": SECRET,
+            "VLM_EXTERNAL_CALLS_ENABLED": "false", "VLM_PROVIDER": "disabled",
+        })
+        self.env.start()
+        self.fake = FakeProvider(provider_result(fields()))
+        app.dependency_overrides[get_vlm_service] = lambda: VLMService(self.fake, backoff_seconds=0)
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
+        self.env.stop()
+
+    async def call_app(self, chunks, *, authenticated=True, content_length=None):
+        headers = [(b"content-type", b"application/json"), (b"x-request-id", REQUEST_ID.encode())]
+        if authenticated:
+            headers.append((b"x-td-internal-key", SECRET.encode()))
+        if content_length is not None:
+            headers.append((b"content-length", str(content_length).encode()))
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "http", "path": "/api/v1/parse/listing-context",
+            "raw_path": b"/api/v1/parse/listing-context", "query_string": b"",
+            "headers": headers, "client": ("testclient", 1234), "server": ("testserver", 80),
+        }
+        received = 0
+        pending = iter(chunks)
+        sent = []
+
+        async def receive():
+            nonlocal received
+            received += 1
+            try:
+                chunk = next(pending)
+            except StopIteration:
+                return {"type": "http.disconnect"}
+            return {"type": "http.request", "body": chunk, "more_body": received < len(chunks)}
+
+        async def send(message):
+            sent.append(message)
+
+        await app(scope, receive, send)
+        starts = [message for message in sent if message["type"] == "http.response.start"]
+        body = b"".join(message.get("body", b"") for message in sent if message["type"] == "http.response.body")
+        return starts, json.loads(body), received
+
+    async def test_missing_content_length_overflow_returns_one_problem_response(self):
+        chunks = [b"x" * (4 * 1024 * 1024), b"y" * (3 * 1024 * 1024), b"z"]
+        starts, body, received = await self.call_app(chunks)
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0]["status"], 413)
+        headers = dict(starts[0]["headers"])
+        self.assertEqual(headers[b"content-type"], b"application/problem+json")
+        self.assertEqual(headers[b"cache-control"], b"no-store")
+        self.assertEqual(body["code"], "REQUEST_TOO_LARGE")
+        self.assertEqual(body["analysisStatus"], "FAILED")
+        self.assertEqual(body["requestId"], REQUEST_ID)
+        self.assertEqual(received, 3)
+        self.assertEqual(self.fake.calls, 0)
+
+    async def test_declared_oversize_and_bad_auth_do_not_read_body(self):
+        starts, body, received = await self.call_app([b"private"], content_length=7 * 1024 * 1024 + 1)
+        self.assertEqual((len(starts), starts[0]["status"], body["code"], received),
+                         (1, 413, "REQUEST_TOO_LARGE", 0))
+        starts, body, received = await self.call_app([b"x" * (7 * 1024 * 1024 + 1)], authenticated=False)
+        self.assertEqual((len(starts), starts[0]["status"], body["code"], received),
+                         (1, 401, "INTERNAL_AUTH_REQUIRED", 0))
+        self.assertEqual(self.fake.calls, 0)
+
+    async def test_exact_limit_and_below_limit_chunks(self):
+        starts, body, received = await self.call_app([b"x" * (4 * 1024 * 1024), b"y" * (3 * 1024 * 1024)])
+        self.assertEqual((len(starts), starts[0]["status"], body["code"], received),
+                         (1, 422, "INVALID_REQUEST", 2))
+        data = json.dumps(request_body()).encode()
+        starts, body, received = await self.call_app([data[:20], data[20:]])
+        self.assertEqual((len(starts), starts[0]["status"], body["status"], received),
+                         (1, 200, "UNVERIFIABLE", 2))
+        self.assertEqual(self.fake.calls, 1)
 
 
 if __name__ == "__main__":

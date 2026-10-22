@@ -72,7 +72,7 @@ async def get_vlm_service() -> VLMService:
                     _vlm_service_instance = VLMService(
                         GeminiProvider(api_key=api_key, model_name=model_name), max_concurrent=concurrency,
                     )
-                except Exception:
-                    logger.error("VLM provider configuration invalid")
+                except Exception as error:
+                    logger.error("VLM provider configuration invalid: %s", type(error).__name__)
                     raise VLMProblem(503, "VLM_CONFIGURATION_ERROR", "Analysis unavailable", "Model configuration is unavailable") from None
     return _vlm_service_instance

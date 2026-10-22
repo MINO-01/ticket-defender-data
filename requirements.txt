@@ -35,6 +35,7 @@ neo4j==6.2.0
 numpy==2.5.1
 openai==3.19.2
 pandas==3.0.5
+pillow==13.0.0
 proto-plus==1.28.2
 protobuf==5.29.6
 pyasn1==0.6.4

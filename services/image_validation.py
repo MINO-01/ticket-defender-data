@@ -113,8 +113,8 @@ def validate_image(
                 image.load()
     except VLMProblem:
         raise
-    except Image.DecompressionBombWarning:
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError):
         raise VLMProblem(413, "IMAGE_TOO_LARGE", "Image too large", "Image exceeds the pixel limit") from None
-    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, SyntaxError, ValueError):
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
         raise VLMProblem(422, "INVALID_IMAGE", "Invalid image", "Image cannot be decoded") from None
     return ValidatedImage(data, claimed_mime, digest, width, height)

@@ -5,9 +5,12 @@ from io import BytesIO, StringIO
 import json
 import logging
 import os
+import struct
 import threading
 import unittest
 from unittest.mock import patch
+import warnings
+import zlib
 
 from fastapi.testclient import TestClient
 from google.genai import errors as genai_errors
@@ -38,6 +41,15 @@ def image_bytes(format="PNG", size=(80, 40), text=None, mode="RGB"):
     output = BytesIO()
     image.save(output, format=format)
     return output.getvalue()
+
+
+def png_with_reported_size(width, height, *, mode="RGB"):
+    """Change only the IHDR dimensions and CRC of a one-pixel synthetic PNG."""
+    data = bytearray(image_bytes(size=(1, 1), mode=mode))
+    assert data[12:16] == b"IHDR"
+    data[16:24] = struct.pack(">II", width, height)
+    data[29:33] = struct.pack(">I", zlib.crc32(data[12:29]))
+    return bytes(data)
 
 
 def request_body(data=None, mime="image/png"):
@@ -227,8 +239,8 @@ class Track2HttpTests(unittest.TestCase):
             ({**request_body(), "mimeType": "image/jpeg"}, 415, "IMAGE_MIME_MISMATCH"),
             ({**request_body(), "imageSha256": "0" * 64}, 400, "IMAGE_SHA256_MISMATCH"),
             (request_body(b"not an image"), 422, "INVALID_IMAGE"),
-            (request_body(image_bytes(size=(5000, 5000))), 413, "IMAGE_TOO_LARGE"),
-            (request_body(image_bytes(size=(4200, 4000), mode="RGBA")), 413, "IMAGE_TOO_LARGE"),
+            (request_body(png_with_reported_size(5000, 5000)), 413, "IMAGE_TOO_LARGE"),
+            (request_body(png_with_reported_size(4200, 4000, mode="RGBA")), 413, "IMAGE_TOO_LARGE"),
             ({**request_body(), "imageBase64": "A" * 6_990_512}, 413, "IMAGE_TOO_LARGE"),
         ]
         for payload, status, code in cases:
@@ -236,6 +248,34 @@ class Track2HttpTests(unittest.TestCase):
                 response = self.post(payload)
                 self.assertEqual((response.status_code, response.json()["code"]), (status, code))
                 self.assertEqual(response.headers["content-type"], "application/problem+json")
+        self.assertEqual(self.fake.calls, 0)
+
+    def test_pillow_bomb_warning_error_and_corruption_on_both_routes(self):
+        warning_png = png_with_reported_size(5000, 5000)
+        error_png = png_with_reported_size(7000, 7000)
+        self.assertLess(len(warning_png), 1024)
+        self.assertLess(len(error_png), 1024)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with self.assertRaises(Image.DecompressionBombWarning):
+                Image.open(BytesIO(warning_png))
+        with self.assertRaises(Image.DecompressionBombError):
+            Image.open(BytesIO(error_png))
+
+        for data, status, code in (
+            (warning_png, 413, "IMAGE_TOO_LARGE"),
+            (error_png, 413, "IMAGE_TOO_LARGE"),
+            (b"not an image", 422, "INVALID_IMAGE"),
+        ):
+            for path in ("/api/v1/parse/listing-context", "/api/v1/parse/ticket-image"):
+                with self.subTest(path=path, expected=code, size=len(data)):
+                    payload = (request_body(data) if path.endswith("listing-context") else {
+                        "image_base64": base64.b64encode(data).decode(), "mime_type": "image/png",
+                    })
+                    response = self.post(payload, path=path)
+                    self.assertEqual((response.status_code, response.json()["code"]), (status, code))
+                    self.assertEqual(response.json()["analysisStatus"], "FAILED")
+                    self.assertEqual(response.headers["content-type"], "application/problem+json")
         self.assertEqual(self.fake.calls, 0)
 
     def test_body_limit_and_trace_errors(self):

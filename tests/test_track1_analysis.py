@@ -1,7 +1,12 @@
 import unittest
+import base64
 from datetime import datetime, timezone
+from io import BytesIO
+import os
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from core.dependencies import get_graph_service, get_vlm_service
 from main import app
@@ -60,12 +65,16 @@ class FailingService(StubService):
 
 
 class StubVLMService:
-    async def parse_ticket_image(self, base64_image, mime_type):
+    async def parse_ticket_image(self, image):
         return {"zone": "A", "row": "1", "seat": "2"}
 
 
 class Track1ContractTests(unittest.TestCase):
     def setUp(self):
+        self.vlm_env = patch.dict(os.environ, {
+            "VLM_ENABLED": "true", "VLM_INTERNAL_SHARED_SECRET": "s" * 40,
+        })
+        self.vlm_env.start()
         app.dependency_overrides[get_graph_service] = lambda: StubService()
         app.dependency_overrides[get_vlm_service] = lambda: StubVLMService()
         self.client = TestClient(app)
@@ -73,6 +82,7 @@ class Track1ContractTests(unittest.TestCase):
     def tearDown(self):
         self.client.close()
         app.dependency_overrides.clear()
+        self.vlm_env.stop()
 
     def test_success_and_existing_routes(self):
         response = self.client.post("/api/v1/clusters/analyze", json=payload())
@@ -93,8 +103,12 @@ class Track1ContractTests(unittest.TestCase):
             }]},
         ).status_code, 200)
         self.assertIn("/api/v1/parse/ticket-image", app.openapi()["paths"])
+        image = BytesIO()
+        Image.new("RGB", (8, 8), "white").save(image, format="PNG")
         vlm_response = self.client.post(
-            "/api/v1/parse/ticket-image", json={"image_base64": "dGVzdA=="}
+            "/api/v1/parse/ticket-image",
+            json={"image_base64": base64.b64encode(image.getvalue()).decode(), "mime_type": "image/png"},
+            headers={"X-TD-Internal-Key": "s" * 40},
         )
         self.assertEqual(vlm_response.status_code, 200)
         self.assertEqual(vlm_response.json()["parsed_data"], {

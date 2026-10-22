@@ -4,7 +4,7 @@ import hmac
 import os
 from uuid import UUID, uuid4
 
-from core.vlm_errors import VLMProblem, problem_response
+from core.vlm_errors import VLMBodyTooLarge, VLMProblem, problem_response
 
 
 VLM_PATHS = frozenset({"/api/v1/parse/ticket-image", "/api/v1/parse/listing-context"})
@@ -76,12 +76,7 @@ class VLMPreBodyGate:
             if message["type"] == "http.request":
                 consumed += len(message.get("body", b""))
                 if consumed > MAX_REQUEST_BODY_BYTES:
-                    raise VLMProblem(413, "REQUEST_TOO_LARGE", "Request too large", "Request exceeds the body limit")
+                    raise VLMBodyTooLarge()
             return message
 
-        try:
-            await self.app(scope, limited_receive, send)
-        except VLMProblem as problem:
-            if problem.code != "REQUEST_TOO_LARGE":
-                raise
-            await reject(problem)
+        await self.app(scope, limited_receive, send)

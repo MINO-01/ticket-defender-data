@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from api.routes import graph_routes, vlm_routes
 from core import dependencies
-from core.vlm_errors import VLMProblem, problem_response
+from core.vlm_errors import VLMBodyTooLarge, VLMProblem, problem_response
 from core.vlm_security import VLMPreBodyGate, VLM_PATHS
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -72,6 +72,14 @@ async def track1_validation_error(request: Request, exc: RequestValidationError)
 @app.exception_handler(VLMProblem)
 async def vlm_problem_error(request: Request, exc: VLMProblem):
     return problem_response(exc, request.state.request_id)
+
+
+@app.exception_handler(VLMBodyTooLarge)
+async def vlm_body_too_large_error(request: Request, exc: VLMBodyTooLarge):
+    return problem_response(
+        VLMProblem(413, "REQUEST_TOO_LARGE", "Request too large", "Request exceeds the body limit"),
+        request.state.request_id,
+    )
 
 allowed_origins = os.getenv("FRONTEND_URL", "http://localhost:3000").split(",")
 app.add_middleware(

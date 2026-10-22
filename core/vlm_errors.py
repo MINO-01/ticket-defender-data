@@ -1,5 +1,6 @@
 """Safe, stable errors for the internal VLM routes."""
 
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 
@@ -10,6 +11,13 @@ class VLMProblem(Exception):
         self.title = title
         self.detail = detail
         super().__init__(code)
+
+
+class VLMBodyTooLarge(HTTPException):
+    """Pass a streamed-body overflow through FastAPI's body parsing boundary."""
+
+    def __init__(self):
+        super().__init__(status_code=413, detail="REQUEST_TOO_LARGE")
 
 
 def problem_response(problem: VLMProblem, request_id: str) -> JSONResponse:

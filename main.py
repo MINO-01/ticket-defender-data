@@ -8,17 +8,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from api.routes import graph_routes, vlm_routes
 from core import dependencies
+from core.vlm_errors import VLMBodyTooLarge, VLMProblem, problem_response
+from core.vlm_security import VLMPreBodyGate, VLM_PATHS
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 logging.getLogger("neo4j").setLevel(logging.WARNING)
+logging.getLogger("google.genai").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
     if dependencies._graph_service_instance:
         await dependencies._graph_service_instance.close()
+    if dependencies._vlm_service_instance:
+        await dependencies._vlm_service_instance.close()
 
 app = FastAPI(
     title="Ticket Fraud Analytics SaaS API", 
@@ -29,6 +34,17 @@ app = FastAPI(
 
 @app.exception_handler(RequestValidationError)
 async def track1_validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path in VLM_PATHS:
+        too_large = any(
+            error["type"] == "string_too_long" and error["loc"][-1] in {"image_base64", "imageBase64"}
+            for error in exc.errors()
+        )
+        problem = (
+            VLMProblem(413, "IMAGE_TOO_LARGE", "Image too large", "Image exceeds the encoded limit")
+            if too_large else
+            VLMProblem(422, "INVALID_REQUEST", "Invalid request", "Request does not match the contract")
+        )
+        return problem_response(problem, request.state.request_id)
     if request.url.path != "/api/v1/clusters/analyze":
         return await request_validation_exception_handler(request, exc)
 
@@ -52,6 +68,19 @@ async def track1_validation_error(request: Request, exc: RequestValidationError)
             codes.add("INVALID_REQUEST")
     return JSONResponse(status_code=422, content={"detail": [{"code": code} for code in sorted(codes)]})
 
+
+@app.exception_handler(VLMProblem)
+async def vlm_problem_error(request: Request, exc: VLMProblem):
+    return problem_response(exc, request.state.request_id)
+
+
+@app.exception_handler(VLMBodyTooLarge)
+async def vlm_body_too_large_error(request: Request, exc: VLMBodyTooLarge):
+    return problem_response(
+        VLMProblem(413, "REQUEST_TOO_LARGE", "Request too large", "Request exceeds the body limit"),
+        request.state.request_id,
+    )
+
 allowed_origins = os.getenv("FRONTEND_URL", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +89,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(VLMPreBodyGate)
 
 app.include_router(graph_routes.router, prefix="/api/v1")
 app.include_router(vlm_routes.router, prefix="/api/v1")

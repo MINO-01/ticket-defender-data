@@ -115,10 +115,12 @@ class Track1AnalysisResponse(BaseModel):
 
 # VLM 제보 파싱 DTO
 class VLMParsedData(BaseModel):
-    """VLM 환각 방지를 위한 엄격한 포맷"""
-    zone: Optional[str] = Field(None, description="구역")
-    row: Optional[str] = Field(None, description="열")
-    seat: Optional[str] = Field(None, description="좌석 번호")
+    """Legacy seat response shape with bounded model-provided strings."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    zone: Optional[str] = Field(None, min_length=1, max_length=64, description="구역")
+    row: Optional[str] = Field(None, min_length=1, max_length=64, description="열")
+    seat: Optional[str] = Field(None, min_length=1, max_length=64, description="좌석 번호")
 
 class VLMResponse(BaseModel):
     status: str = Field(default="success")

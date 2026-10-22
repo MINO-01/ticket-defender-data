@@ -16,7 +16,7 @@ from schemas.listing_context import (
     MAX_LISTING_IMAGE_BYTES, derive_listing_status,
 )
 from services.image_validation import (
-    LEGACY_MAX_BASE64_LENGTH, LEGACY_MAX_IMAGE_BYTES, validate_image,
+    LEGACY_MAX_BASE64_LENGTH, LEGACY_MAX_IMAGE_BYTES, validate_image_in_thread,
 )
 from services.vlm_service import VLMService
 
@@ -41,7 +41,7 @@ async def parse_ticket_image_endpoint(
     vlm_service: VLMService = Depends(get_vlm_service),
 ):
     try:
-        image = validate_image(
+        image = await validate_image_in_thread(
             request.image_base64, request.mime_type,
             max_base64_length=LEGACY_MAX_BASE64_LENGTH,
             max_bytes=LEGACY_MAX_IMAGE_BYTES,
@@ -66,7 +66,7 @@ async def parse_listing_context_endpoint(
         raise VLMProblem(422, "INVALID_REQUEST", "Invalid request", "Trace and body request IDs differ")
     request.state.request_id = payload.request_id
     try:
-        image = validate_image(
+        image = await validate_image_in_thread(
             payload.image_base64, payload.mime_type,
             max_base64_length=MAX_LISTING_BASE64_LENGTH,
             max_bytes=MAX_LISTING_IMAGE_BYTES,

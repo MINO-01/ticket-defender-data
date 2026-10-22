@@ -93,7 +93,7 @@ Errors are `application/problem+json` with `{type,title,status,code,detail,reque
 | 415 | `UNSUPPORTED_IMAGE_TYPE`, `IMAGE_MIME_MISMATCH` | Unsupported or disguised format. |
 | 422 | `INVALID_REQUEST`, `INVALID_IMAGE` | Invalid schema or damaged image. |
 | 502 | `MODEL_RESPONSE_INVALID`, `MODEL_REQUEST_REJECTED` | Model returned invalid output or permanently rejected a request. |
-| 503 | `VLM_DISABLED`, `VLM_CONFIGURATION_ERROR`, `MODEL_PROVIDER_UNCONFIGURED`, `VLM_BUSY`, `MODEL_UNAVAILABLE` | Feature disabled, missing secret/provider, concurrency cap, or transient provider failure. |
+| 503 | `VLM_DISABLED`, `VLM_CONFIGURATION_ERROR`, `MODEL_PROVIDER_UNCONFIGURED`, `VLM_BUSY`, `IMAGE_VALIDATION_BUSY`, `MODEL_UNAVAILABLE` | Feature disabled, missing secret/provider, validation or model concurrency cap, or transient provider failure. |
 | 504 | `MODEL_TIMEOUT` | Total model time budget exhausted. |
 | 500 | `ANALYSIS_INTERNAL_ERROR` | Unexpected internal failure, without exception details. |
 

@@ -1,13 +1,16 @@
 """Validate image bytes before any model adapter can receive them."""
 
+import asyncio
 import base64
 import binascii
 from dataclasses import dataclass
 import hashlib
 from io import BytesIO
+import threading
 import warnings
 
 from PIL import Image, UnidentifiedImageError
+from starlette.concurrency import run_in_threadpool
 
 from core.vlm_errors import VLMProblem
 
@@ -18,6 +21,8 @@ MAX_ESTIMATED_DECODED_BYTES = 64 * 1024 * 1024
 LEGACY_MAX_BASE64_LENGTH = 5_242_880
 LEGACY_MAX_IMAGE_BYTES = LEGACY_MAX_BASE64_LENGTH // 4 * 3
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+_VALIDATION_SLOT = threading.BoundedSemaphore(1)
+_VALIDATION_WAIT_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,41 @@ class ValidatedImage:
     sha256: str
     width: int
     height: int
+
+
+def _release_validation_slot(completed: asyncio.Task):
+    # A cancelled request must not release its slot while Pillow is still running.
+    try:
+        if not completed.cancelled():
+            completed.exception()
+    finally:
+        _VALIDATION_SLOT.release()
+
+
+async def validate_image_in_thread(
+    encoded: str, claimed_mime: str, *, max_base64_length: int,
+    max_bytes: int, expected_sha256: str | None = None, allow_webp: bool = False,
+) -> ValidatedImage:
+    """Bound worker validation and retain the slot until the worker actually exits."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _VALIDATION_WAIT_SECONDS
+    while not _VALIDATION_SLOT.acquire(blocking=False):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise VLMProblem(503, "IMAGE_VALIDATION_BUSY", "Analysis busy", "Image validation capacity is exhausted")
+        await asyncio.sleep(min(0.005, remaining))
+
+    try:
+        task = asyncio.create_task(run_in_threadpool(
+            validate_image, encoded, claimed_mime,
+            max_base64_length=max_base64_length, max_bytes=max_bytes,
+            expected_sha256=expected_sha256, allow_webp=allow_webp,
+        ))
+    except BaseException:
+        _VALIDATION_SLOT.release()
+        raise
+    task.add_done_callback(_release_validation_slot)
+    return await asyncio.shield(task)
 
 
 def validate_image(

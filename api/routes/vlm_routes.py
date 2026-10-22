@@ -1,53 +1,91 @@
+"""Authenticated internal image parsing endpoints."""
+
+from datetime import datetime, timezone
 import logging
-import binascii
 from typing import Literal
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
-from schemas.dto import VLMResponse, VLMParsedData
+
+from fastapi import APIRouter, Depends, Request, Security
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, ConfigDict, Field
+
 from core.dependencies import get_vlm_service
+from core.vlm_errors import VLMProblem
+from schemas.dto import VLMResponse
+from schemas.listing_context import (
+    ListingContextRequest, ListingContextResponse, MAX_LISTING_BASE64_LENGTH,
+    MAX_LISTING_IMAGE_BYTES, derive_listing_status,
+)
+from services.image_validation import (
+    LEGACY_MAX_BASE64_LENGTH, LEGACY_MAX_IMAGE_BYTES, validate_image,
+)
 from services.vlm_service import VLMService
 
+
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/parse", tags=["Track 2 (VLM)"])
+router = APIRouter(
+    prefix="/parse", tags=["Track 2 (VLM)"],
+    dependencies=[Security(APIKeyHeader(name="X-TD-Internal-Key", auto_error=False))],
+)
+
 
 class ImageParseRequest(BaseModel):
-    image_base64: str = Field(
-        ..., 
-        max_length=5242880, 
-        description="Base64 인코딩된 티켓 이미지 데이터 (헤더 제외, 최대 5MB)"
-    )
-    mime_type: Literal["image/jpeg", "image/png", "image/webp"] = Field(
-        default="image/jpeg", 
-        description="이미지 MIME 타입"
-    )
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    image_base64: str = Field(min_length=1, max_length=LEGACY_MAX_BASE64_LENGTH)
+    mime_type: Literal["image/jpeg", "image/png", "image/webp"] = "image/jpeg"
+
 
 @router.post("/ticket-image", response_model=VLMResponse)
 async def parse_ticket_image_endpoint(
     request: ImageParseRequest,
-    vlm_service: VLMService = Depends(get_vlm_service)
+    vlm_service: VLMService = Depends(get_vlm_service),
 ):
-    """
-    [Track 2] 제보된 티켓 이미지를 VLM으로 비동기 분석하여 
-    구역(Zone), 열(Row), 좌석(Seat) 정보를 순수 JSON 형태로 추출합니다.
-    """
-    logger.info("[Track 2] VLM 티켓 이미지 파싱 요청 수신")
-    
     try:
-        parsed_dict = await vlm_service.parse_ticket_image(
-            base64_image=request.image_base64,
-            mime_type=request.mime_type
+        image = validate_image(
+            request.image_base64, request.mime_type,
+            max_base64_length=LEGACY_MAX_BASE64_LENGTH,
+            max_bytes=LEGACY_MAX_IMAGE_BYTES,
+            allow_webp=True,
         )
-        
-        vlm_data = VLMParsedData(**parsed_dict)
-        
-        return VLMResponse(
-            status="success",
-            message="티켓 좌석 정보 파싱 완료",
-            parsed_data=vlm_data
+        parsed = await vlm_service.parse_ticket_image(image)
+        return VLMResponse(status="success", message="티켓 좌석 정보 파싱 완료", parsed_data=parsed)
+    except VLMProblem:
+        raise
+    except Exception as error:
+        logger.error("Ticket image analysis failed: %s", type(error).__name__)
+        raise VLMProblem(500, "ANALYSIS_INTERNAL_ERROR", "Analysis failed", "Analysis failed internally") from None
+
+
+@router.post("/listing-context", response_model=ListingContextResponse, response_model_by_alias=True)
+async def parse_listing_context_endpoint(
+    payload: ListingContextRequest,
+    request: Request,
+    vlm_service: VLMService = Depends(get_vlm_service),
+):
+    if request.state.supplied_trace and request.state.request_id != payload.request_id:
+        raise VLMProblem(422, "INVALID_REQUEST", "Invalid request", "Trace and body request IDs differ")
+    request.state.request_id = payload.request_id
+    try:
+        image = validate_image(
+            payload.image_base64, payload.mime_type,
+            max_base64_length=MAX_LISTING_BASE64_LENGTH,
+            max_bytes=MAX_LISTING_IMAGE_BYTES,
+            expected_sha256=payload.image_sha256,
+            allow_webp=False,
         )
-    except binascii.Error:
-        logger.error("[Track 2] VLM 파싱 처리 중 Base64 디코딩 오류")
-        raise HTTPException(status_code=400, detail="유효하지 않은 Base64 형식입니다.")
-    except Exception as e:
-        logger.error(f"[Track 2] VLM 파싱 처리 중 서버 에러: {e}")
-        raise HTTPException(status_code=500, detail="이미지 파싱 중 외부 API 통신 오류가 발생했습니다.")
+        fields, model_name, model_version = await vlm_service.parse_listing_context(image)
+        return ListingContextResponse(
+            request_id=payload.request_id,
+            evidence_id=payload.evidence_id,
+            image_sha256=payload.image_sha256,
+            status=derive_listing_status(fields),
+            fields=fields,
+            model_name=model_name,
+            model_version=model_version,
+            analyzed_at=datetime.now(timezone.utc),
+        )
+    except VLMProblem:
+        raise
+    except Exception as error:
+        logger.error("Listing analysis failed: %s", type(error).__name__)
+        raise VLMProblem(500, "ANALYSIS_INTERNAL_ERROR", "Analysis failed", "Analysis failed internally") from None

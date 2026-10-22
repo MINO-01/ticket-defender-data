@@ -8,6 +8,8 @@ load_dotenv()
 
 from services.graph_service import GraphService
 from services.vlm_service import VLMService
+from services.vlm_service import GeminiProvider
+from core.vlm_errors import VLMProblem
 
 logger = logging.getLogger(__name__)
 
@@ -51,26 +53,26 @@ async def get_graph_service() -> GraphService:
     return _graph_service_instance
 
 async def get_vlm_service() -> VLMService:
-    """
-    [Track 2] FastAPI 의존성 주입(DI)을 위한 VLMService 비동기 싱글톤 인스턴스를 반환합니다.
-    외부 AI API 호출 시 메모리 누수를 막기 위해 단일 객체로 유지합니다.
-    """
+    """Return a provider only after explicit external-transfer configuration."""
     global _vlm_service_instance
-    
+
+    if os.getenv("VLM_EXTERNAL_CALLS_ENABLED", "false").lower() != "true" or os.getenv("VLM_PROVIDER") != "gemini":
+        raise VLMProblem(503, "MODEL_PROVIDER_UNCONFIGURED", "Analysis unavailable", "Model provider is unavailable")
     if _vlm_service_instance is None:
         async with _lock:
             if _vlm_service_instance is None:
                 api_key = os.getenv("GEMINI_API_KEY")
-                
                 if not api_key:
-                    logger.error("보안 경고: 외부 AI API 키(GEMINI_API_KEY)가 누락되었습니다.")
-                    raise HTTPException(status_code=500, detail="VLM Configuration Error")
-                
+                    raise VLMProblem(503, "VLM_CONFIGURATION_ERROR", "Analysis unavailable", "Model configuration is unavailable")
                 try:
-                    _vlm_service_instance = VLMService(api_key=api_key)
-                    logger.info("VLMService(Gemini) 비동기 싱글톤 객체가 성공적으로 초기화되었습니다.")
-                except Exception as e:
-                    logger.exception(f"VLMService 초기화 중 오류 발생: {e}")
-                    raise HTTPException(status_code=500, detail="VLM Service Initialization Failed")
-                
+                    model_name = os.getenv("VLM_MODEL", "gemini-3.8-flash")
+                    if not model_name or len(model_name) > 128:
+                        raise ValueError("invalid model")
+                    concurrency = int(os.getenv("VLM_MAX_CONCURRENT", "2"))
+                    _vlm_service_instance = VLMService(
+                        GeminiProvider(api_key=api_key, model_name=model_name), max_concurrent=concurrency,
+                    )
+                except Exception:
+                    logger.error("VLM provider configuration invalid")
+                    raise VLMProblem(503, "VLM_CONFIGURATION_ERROR", "Analysis unavailable", "Model configuration is unavailable") from None
     return _vlm_service_instance

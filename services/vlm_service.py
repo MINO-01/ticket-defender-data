@@ -59,8 +59,10 @@ class GeminiProvider:
                 contents=[prompt, types.Part.from_bytes(data=image.data, mime_type=image.mime_type)],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=response_schema,
-                    temperature=0.0,
+                    # response_schema 변환은 extra=forbid 를 API가 거부하는 additional_properties 로 보내므로
+                    # 같은 Pydantic 계약을 표준 JSON Schema 로 전달합니다. 서버 검증은 그대로 유지됩니다.
+                    response_json_schema=response_schema.model_json_schema(by_alias=True),
+                    # Gemini 3 이후 모델은 temperature 등 샘플링 인자를 지원 중단했으므로 보내지 않습니다.
                     max_output_tokens=2048,
                 ),
             )

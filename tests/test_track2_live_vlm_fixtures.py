@@ -1,6 +1,8 @@
 """실모델 평가 체계의 CI 검증. 외부 모델을 호출하지 않고 fixture, 채점기, 실행 게이트, 요청 구성만 확인합니다."""
 
 import base64
+import json
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -117,6 +119,89 @@ class LiveRunGateTests(unittest.TestCase):
             route.assert_not_called()
             install.assert_not_called()
             self.assertFalse(Path(output).exists())
+
+
+def failed_route_results(entries, _internal_key, meter, calls):
+    """외부 호출 없이 경로 평가가 호출 예산을 정확히 calls 회 소진한 상황을 재현합니다."""
+    meter.calls.extend({"index": index + 1, "error": "ServerError", "errorCode": 503} for index in range(calls))
+    return [live_vlm_eval.score_response(entry, 503, {"code": "MODEL_UNAVAILABLE"}) for entry in entries]
+
+
+class LiveRunSelectionAndBudgetTests(unittest.TestCase):
+    """실제 Gemini 를 호출하지 않도록 키, SDK 계측, 경로 평가를 모두 대체합니다."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.output = Path(directory.name) / "report.json"
+        for patcher in (patch.dict(os.environ), patch.object(live_vlm_eval, "_api_key", return_value="synthetic-key"),
+                        patch.object(live_vlm_eval.CallMeter, "install"), patch("sys.stdout")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_main(self, *extra):
+        return live_vlm_eval.main([live_vlm_eval.CONFIRM_FLAG, "--output", str(self.output), *extra])
+
+    def test_unknown_only_id_fails_before_any_call(self):
+        with patch.object(live_vlm_eval, "run_route_evaluation") as route:
+            self.assertEqual(2, self.run_main("--only", "ko_resale_post", "no_such_fixture"))
+        route.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_only_without_ids_is_rejected_instead_of_running_all(self):
+        with patch.object(live_vlm_eval, "run_route_evaluation") as route, \
+                patch("sys.stderr"), self.assertRaises(SystemExit) as raised:
+            self.run_main("--only")
+        self.assertEqual(2, raised.exception.code)
+        route.assert_not_called()
+
+    def test_single_and_multiple_only_ids_keep_selection(self):
+        for ids in (["price_manwon"], ["ko_resale_post", "price_manwon"]):
+            with self.subTest(ids=ids), patch.object(
+                    live_vlm_eval, "run_route_evaluation",
+                    side_effect=lambda entries, key, meter: failed_route_results(entries, key, meter, 0)) as route:
+                self.assertEqual(0, self.run_main("--only", *ids))
+                self.assertEqual(ids, [entry["id"] for entry in route.call_args.args[0]])
+
+    def test_probes_skipped_when_route_spent_exact_budget_and_report_is_kept(self):
+        with patch.object(live_vlm_eval, "run_route_evaluation",
+                          side_effect=lambda entries, key, meter: failed_route_results(entries, key, meter, 3)), \
+                patch.object(live_vlm_eval, "run_failure_probes") as probes:
+            self.assertEqual(0, self.run_main("--only", "ko_resale_post", "--max-calls", "3", "--failure-probes"))
+        probes.assert_not_called()
+        report = json.loads(self.output.read_text(encoding="utf-8"))
+        self.assertEqual("SKIPPED_INSUFFICIENT_BUDGET", report["failureProbesStatus"])
+        self.assertEqual(3, len(report["calls"]))
+        self.assertEqual(["ko_resale_post"], [result["id"] for result in report["results"]])
+
+    def test_probes_run_only_with_worst_case_budget(self):
+        calls = live_vlm_eval.DEFAULT_MAX_CALLS - live_vlm_eval.FAILURE_PROBE_MAX_CALLS
+        with patch.object(live_vlm_eval, "run_route_evaluation",
+                          side_effect=lambda entries, key, meter: failed_route_results(entries, key, meter, calls)), \
+                patch.object(live_vlm_eval, "run_failure_probes", return_value=[]) as probes:
+            self.assertEqual(0, self.run_main("--only", "ko_resale_post", "--failure-probes"))
+        probes.assert_called_once()
+        report = json.loads(self.output.read_text(encoding="utf-8"))
+        self.assertEqual("COMPLETED", report["failureProbesStatus"])
+
+
+class FailureProbeBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_budget_exceeded_inside_probe_is_recorded_not_raised(self):
+        class BudgetProvider:
+            def __init__(self, *_args):
+                self.calls = 0
+
+            async def generate(self, *_args):
+                self.calls += 1
+                raise live_vlm_eval.CallBudgetExceeded()
+
+            async def close(self):
+                pass
+
+        entry = live_vlm_eval.load_manifest()[0]
+        with patch("services.vlm_service.GeminiProvider", BudgetProvider):
+            results = await live_vlm_eval.run_failure_probes(entry, "synthetic-key", "fake-model")
+        self.assertEqual([{"probe": "permanent_unknown_model", "outcome": "BUDGET_EXHAUSTED"}], results)
 
 
 class GeminiRequestTests(unittest.IsolatedAsyncioTestCase):

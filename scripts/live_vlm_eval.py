@@ -30,6 +30,12 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "t
 FIELD_NAMES = ("eventName", "performanceAt", "platformDisplayName", "askingPrice", "currency",
                "saleText", "zone", "row", "seat")
 DEFAULT_MAX_CALLS = 14
+# 추가 검증별 서비스 제한. 최악의 경우 시도 횟수 합만큼 SDK 호출이 필요합니다.
+FAILURE_PROBE_LIMITS = {
+    "permanent_unknown_model": {"max_attempts": 3},
+    "timeout_bounded_retry": {"max_attempts": 2, "timeout_seconds": 0.05, "backoff_seconds": 0},
+}
+FAILURE_PROBE_MAX_CALLS = sum(limits["max_attempts"] for limits in FAILURE_PROBE_LIMITS.values())
 CONFIRM_FLAG = "--confirm-synthetic-external-call"
 
 # 필드 채점 결과. ACCEPTED_* 만 정답으로 계산합니다.
@@ -240,25 +246,27 @@ def run_route_evaluation(entries: list[dict], internal_key: str, meter: "CallMet
 
 
 async def run_failure_probes(entry: dict, api_key: str, model_name: str) -> list[dict]:
-    """영구 거부와 시간 초과의 실제 재시도 동작을 서비스 계층에서 확인합니다."""
+    """영구 거부와 시간 초과의 실제 재시도 동작을 서비스 계층에서 확인합니다.
+
+    호출 예산이 도중에 소진되면 예외를 전파하지 않고 BUDGET_EXHAUSTED 로 기록한 뒤 남은 검증을 멈춥니다.
+    """
     from core.vlm_errors import VLMProblem
     from services.image_validation import ValidatedImage
     from services.vlm_service import GeminiProvider, VLMService
 
     image = ValidatedImage(entry["data"], entry["mimeType"], entry["sha256"], entry["width"], entry["height"])
-    probes = [
-        ("permanent_unknown_model", GeminiProvider(api_key, "td-nonexistent-model"), {"max_attempts": 3}),
-        ("timeout_bounded_retry", GeminiProvider(api_key, model_name),
-         {"max_attempts": 2, "timeout_seconds": 0.05, "backoff_seconds": 0}),
-    ]
+    models = {"permanent_unknown_model": "td-nonexistent-model", "timeout_bounded_retry": model_name}
     results = []
-    for name, provider, limits in probes:
-        service = VLMService(provider, **limits)
+    for name, limits in FAILURE_PROBE_LIMITS.items():
+        service = VLMService(GeminiProvider(api_key, models[name]), **limits)
         try:
             await service.parse_listing_context(image)
             results.append({"probe": name, "outcome": "UNEXPECTED_SUCCESS"})
         except VLMProblem as problem:
             results.append({"probe": name, "httpStatus": problem.status_code, "code": problem.code})
+        except CallBudgetExceeded:
+            results.append({"probe": name, "outcome": "BUDGET_EXHAUSTED"})
+            break
         finally:
             await service.close()
     return results
@@ -270,7 +278,7 @@ def main(argv=None) -> int:
                         help="합성 fixture를 외부 Gemini API로 전송하는 것에 동의")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
-    parser.add_argument("--only", nargs="*", help="평가할 fixture id 목록")
+    parser.add_argument("--only", nargs="+", help="평가할 fixture id 목록")
     parser.add_argument("--failure-probes", action="store_true")
     args = parser.parse_args(argv)
     if not args.confirmed:
@@ -286,7 +294,12 @@ def main(argv=None) -> int:
 
     entries = load_manifest()
     if args.only:
-        entries = [entry for entry in entries if entry["id"] in set(args.only)]
+        selected = set(args.only)
+        unknown = selected - {entry["id"] for entry in entries}
+        if unknown:
+            print(f"알 수 없는 fixture id: {', '.join(sorted(unknown))}", file=sys.stderr)
+            return 2
+        entries = [entry for entry in entries if entry["id"] in selected]
     model_name = os.getenv("VLM_MODEL", "gemini-3.8-flash")
     # 이 프로세스에서만 합성 평가용 게이트를 엽니다. 운영 기본값과 .env 는 변경하지 않습니다.
     internal_key = secrets.token_urlsafe(48)
@@ -303,13 +316,21 @@ def main(argv=None) -> int:
     started = time.perf_counter()
     results = run_route_evaluation(entries, internal_key, meter)
     probes = []
-    if args.failure_probes and not meter.exhausted:
-        probes = asyncio.run(run_failure_probes(entries[0], api_key, model_name))
+    probe_status = "NOT_REQUESTED"
+    if args.failure_probes:
+        # 경로 평가가 예산을 정확히 소진해도 exhausted 는 거짓이므로 남은 호출 수로 사전 검사합니다.
+        if meter.max_calls - len(meter.calls) < FAILURE_PROBE_MAX_CALLS:
+            probe_status = "SKIPPED_INSUFFICIENT_BUDGET"
+        else:
+            probes = asyncio.run(run_failure_probes(entries[0], api_key, model_name))
+            exhausted = any(probe.get("outcome") == "BUDGET_EXHAUSTED" for probe in probes)
+            probe_status = "BUDGET_EXHAUSTED" if exhausted else "COMPLETED"
     report = {
         "model": model_name, "sdk": f"google-genai {sdk_version}", "python": sys.version.split()[0],
         "elapsedSeconds": round(time.perf_counter() - started, 2), "maxCalls": args.max_calls,
         "budgetExhausted": meter.exhausted,
-        "summary": summarize(results), "results": results, "failureProbes": probes, "calls": meter.calls,
+        "summary": summarize(results), "results": results, "failureProbes": probes,
+        "failureProbesStatus": probe_status, "calls": meter.calls,
     }
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"], ensure_ascii=False))

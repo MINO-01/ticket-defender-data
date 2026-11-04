@@ -20,6 +20,7 @@ from core.dependencies import get_vlm_service
 from core.vlm_errors import VLMBodyTooLarge, VLMProblem
 from core.vlm_security import VLMPreBodyGate
 from main import app
+from schemas.listing_context import ListingFields
 from services import image_validation
 from services.image_validation import (
     LEGACY_MAX_BASE64_LENGTH, LEGACY_MAX_IMAGE_BYTES, ValidatedImage, validate_image_in_thread,
@@ -426,7 +427,7 @@ class ProviderServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status):
                 adapter.client = FakeClient(status)
                 with self.assertRaises(expected):
-                    await adapter.generate(self.image, "synthetic prompt", object)
+                    await adapter.generate(self.image, "synthetic prompt", ListingFields)
 
 
 class ImageValidationWorkerTests(unittest.IsolatedAsyncioTestCase):

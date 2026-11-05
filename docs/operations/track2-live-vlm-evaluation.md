@@ -15,6 +15,32 @@ Issue #23 adds a separate, opt-in harness that sends **synthetic** listing image
 
 Because no call returned model output, the completion criteria for live model success, live field structure, live FOUND, UNKNOWN and AMBIGUOUS behaviour, and live accuracy remain **incomplete**. Fake provider results are not reported as live results.
 
+## Follow-up run (2026-11-05): first live structured responses
+
+The same SDK, adapter request shape (`response_json_schema`, no `temperature`, `max_output_tokens=2048`) and route were used. No code, contract, timeout or default was changed. Only `VLM_MODEL` was set for the process.
+
+| Step | Model | Calls | Result |
+| --- | --- | --- | --- |
+| Harness, `clear_all_fields`, budget 1 | `gemini-3.8-flash` | 1 | 504 `DEADLINE_EXCEEDED` at 13.4 s, route 500 `BUDGET_EXHAUSTED` (budget guard) |
+| Direct probe, 60 s deadline | `gemini-3.8-flash` | 1 | 503 `UNAVAILABLE` (high demand) at 5.4 s |
+| Direct probe, 60 s deadline | `gemini-3.7-flash` | 1 | 503 `UNAVAILABLE` at 6.4 s |
+| Direct probe, 60 s deadline | `gemini-3.5-flash` | 1 | 503 `UNAVAILABLE` at 3.2 s |
+| Direct probe, 60 s deadline | `gemini-2.5-flash` | 1 | 404 `NOT_FOUND`, no longer available to new users |
+| Direct probe, 60 s deadline | `gemini-3.1-flash-lite` | 1 | **Success**, `STOP`, 3.0 s, 1,217 input and 456 output tokens |
+| Harness, 3 fixtures, budget 4 | `gemini-3.1-flash-lite` | 3 | **3/3 HTTP 200 `COMPLETED`, 27/27 fields accepted** |
+| Harness, `price_manwon`, budget 1, raw body captured | `gemini-3.1-flash-lite` | 1 | **HTTP 200 `COMPLETED`, 9/9**, `15만원` normalized to `150000` |
+
+10 metered calls in total. Only 5 produced output tokens: 6,159 input and 2,038 output tokens altogether.
+
+Findings:
+
+1. **The request shape is accepted.** The question left open on 2026-11-04 (a model-level JSON Schema rejection) is settled. The `response_json_schema` request returns schema-valid JSON, and server-side `ListingFields` validation accepts it.
+2. **The default model failure is provider capacity, not the time limit.** With a 60 s deadline, `gemini-3.8-flash` still returned 503 in about 5 s, as did two other Flash generations. A longer deadline would not have produced output, so the 15 s per-attempt and 35 s total limits stay unchanged. `gemini-3.1-flash-lite` answered in about 2.5 to 3 s with no thinking tokens, well inside both limits and the 2,048 output cap.
+3. **Live state behaviour observed.** `clear_all_fields`: 9 FOUND. `missing_fields`: 7 UNKNOWN with `unknownReason=ABSENT`, eventName and saleText FOUND. `multiple_seat_candidates`: `seat` AMBIGUOUS with candidates `21` and `22`. `modelName` and `modelVersion` (`gemini-3.1-flash-lite`) and `analyzedAt` were present in every response.
+4. **Spring compatibility.** The raw 200 body from the `price_manwon` route was checked against a port of the `ListingContextClient.parse` rules from the backend repository: exact top-level and observation keys, echoed `requestId`, `evidenceId` and `imageSha256`, `reviewRequired=true`, `errorCode=null`, state invariants, the `askingPrice` amount pattern, `evidenceQuote` containing `raw`, and the derived status. It passed. The contract was not changed.
+
+Demo setting: for a synthetic-data demo while `gemini-3.8-flash` is overloaded, set `VLM_MODEL=gemini-3.1-flash-lite` together with the existing explicit gates. The code default stays `gemini-3.8-flash`. Changing the default model is a separate decision, because only 4 of the 10 fixtures were scored on the lite model.
+
 ### Call log
 
 | Run | Config | SDK calls | Provider result | Route result |
@@ -91,8 +117,8 @@ A live evaluation is a separate manual command for an account approved for synth
 
 ## Remaining work and release gates
 
-- Rerun the full 10-fixture set when the provider is not overloaded (about 10 to 14 calls), then record per-field accuracy, false FOUND cases, UNKNOWN and AMBIGUOUS results, `thoughtsTokens` against the 2,048 output cap, and latency. Then decide whether `thinking_level` or `max_output_tokens` needs tuning, with evidence.
-- The 15-second per-attempt and 35-second total limits were set in W03. Repeated server 504s at about 14 s may mean they are too tight under load. Changing them is a separate decision.
+- Run the remaining 6 fixtures (`ko_ticket_basic`, `ko_resale_post`, `seat_partially_masked`, `low_quality_small_text`, `unreadable_blur`, `prompt_injection`) on `gemini-3.1-flash-lite`, and rerun the full set on `gemini-3.8-flash` when it is not overloaded (about 10 to 14 calls per model). Then record per-field accuracy, false FOUND cases, UNKNOWN and AMBIGUOUS results, `thoughtsTokens` against the 2,048 output cap, and latency. Then decide whether `thinking_level` or `max_output_tokens` needs tuning, with evidence.
+- The 15-second per-attempt and 35-second total limits were set in W03. Repeated server 504s at about 14 s may mean they are too tight under load. Changing them is a separate decision. The 2026-11-05 run found no evidence that a longer deadline helps: a 60 s deadline still got 503 in about 5 s.
   - Time budget: `GeminiProvider` gives the SDK a 15 s timeout, and `VLMService` gives each attempt a separate 15 s `asyncio.wait_for`, so both expire at about the same time. Up to 3 attempts run inside one 35 s `asyncio.timeout`, with backoffs of 0.25 s and 0.5 s. Two failures of about 14 s each plus backoff use about 29 s, which leaves only about 6 s for the third attempt. If that attempt is cut off, the route returns 504 `MODEL_TIMEOUT` instead of 503 `MODEL_UNAVAILABLE`, so the third retry is largely wasted under these conditions. Three full attempts need about 3 x 15 + 0.75 = 45.75 s.
   - Options for the separate decision: raise the total limit to at least about 46 s, or reduce `max_attempts` to 2 while keeping 35 s. This PR changes neither.
 - The fixtures are not a statistical benchmark. Even a perfect score would not show production accuracy on real fan images.

@@ -37,4 +37,8 @@ async def analyze_louvain_clusters(
 @router.post("/macro", include_in_schema=False)
 async def legacy_macro_removed():
     """레거시 WCC 경로는 본문을 읽거나 그래프에 적재하지 않고 항상 410으로 차단합니다."""
-    return JSONResponse(status_code=410, content={"detail": [{"code": "LEGACY_ENDPOINT_REMOVED"}]})
+    return JSONResponse(
+        status_code=410,
+        content={"detail": [{"code": "LEGACY_ENDPOINT_REMOVED"}]},
+        headers={"Cache-Control": "no-store"},
+    )

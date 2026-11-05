@@ -164,6 +164,7 @@ class Track1InternalAuthTests(unittest.TestCase):
                 response = self.client.post(MACRO, json=LEGACY_PAYLOAD, headers=headers)
                 self.assertEqual(response.status_code, 410)
                 self.assertEqual(response.json(), {"detail": [{"code": "LEGACY_ENDPOINT_REMOVED"}]})
+                self.assertEqual(response.headers["cache-control"], "no-store")
         response = self.client.post(MACRO + "?threshold=2", content="{", headers={"content-type": "application/json"})
         self.assertEqual(response.status_code, 410)
         self.assertNotIn(MACRO, app.openapi()["paths"])

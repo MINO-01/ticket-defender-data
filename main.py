@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from api.routes import graph_routes, vlm_routes
 from core import dependencies
 from core.vlm_errors import VLMBodyTooLarge, VLMProblem, problem_response
+from core.track1_security import Track1AuthGate
 from core.vlm_security import VLMPreBodyGate, VLM_PATHS
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -90,6 +91,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(VLMPreBodyGate)
+# Track 1 인증은 VLM 게이트와 경로가 겹치지 않으며 가장 바깥에서 본문 수신 전에 실행됩니다.
+app.add_middleware(Track1AuthGate)
 
 app.include_router(graph_routes.router, prefix="/api/v1")
 app.include_router(vlm_routes.router, prefix="/api/v1")

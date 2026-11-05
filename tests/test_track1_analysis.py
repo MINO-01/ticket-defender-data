@@ -18,6 +18,7 @@ REQUEST_ID = "2136558c-2326-4430-a46d-0793494e9b49"
 PAYMENT_A = "a" * 64
 PAYMENT_B = "b" * 64
 DEVICE_A = "c" * 64
+TRACK1_KEY = "t" * 40
 
 
 def ticket(number, **overrides):
@@ -73,11 +74,12 @@ class Track1ContractTests(unittest.TestCase):
     def setUp(self):
         self.vlm_env = patch.dict(os.environ, {
             "VLM_ENABLED": "true", "VLM_INTERNAL_SHARED_SECRET": "s" * 40,
+            "TRACK1_INTERNAL_SHARED_SECRET": TRACK1_KEY,
         })
         self.vlm_env.start()
         app.dependency_overrides[get_graph_service] = lambda: StubService()
         app.dependency_overrides[get_vlm_service] = lambda: StubVLMService()
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={"X-TD-Track1-Key": TRACK1_KEY})
 
     def tearDown(self):
         self.client.close()
@@ -101,7 +103,7 @@ class Track1ContractTests(unittest.TestCase):
                 "accountId": "uid-1", "paymentHash": PAYMENT_A,
                 "addressHash": PAYMENT_A, "deviceIdHash": DEVICE_A, "ipHash": PAYMENT_A
             }]},
-        ).status_code, 200)
+        ).status_code, 410)
         self.assertIn("/api/v1/parse/ticket-image", app.openapi()["paths"])
         image = BytesIO()
         Image.new("RGB", (8, 8), "white").save(image, format="PNG")

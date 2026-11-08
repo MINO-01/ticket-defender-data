@@ -8,7 +8,7 @@ import unittest
 
 from evaluation.capstone_demo import ledger, ledger_v2
 from evaluation.capstone_demo.compare import (
-    PROXY_ENGINE, compare_ledger, evaluate_clusters, load_request, proxy_v1_clusters,
+    PROXY_ENGINE, MeasuringDriver, compare_ledger, evaluate_clusters, load_request, proxy_v1_clusters,
 )
 from evaluation.track1.legacy_score_v1 import legacy_clusters_from_communities, legacy_edges
 from schemas.dto import Track1AnalysisRequest, Track1Cluster, Track1ClusterMember
@@ -274,6 +274,40 @@ class FixedKMetricTests(unittest.TestCase):
         self.assertEqual(row["normalSharedInTop"], 1)
         self.assertEqual(row["normalSharedTopRate"], 1 / 4)
         self.assertEqual(row["normalSharedShareOfSelected"], 1 / 5)
+
+
+class MeasuringDriverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_records_projection_counts_without_touching_other_queries(self):
+        seen = []
+
+        class Result:
+            async def single(self):
+                return {"nodeCount": 3, "relationshipCount": 4}
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def run(self, query, **_):
+                seen.append(query)
+                return Result()
+
+        class Driver:
+            def session(self):
+                return Session()
+
+        driver = MeasuringDriver(Driver())
+        async with driver.session() as session:
+            await session.run("x RETURN graph.nodeCount AS nodeCount", graph_name="g1")
+            await session.run("CALL gds.louvain.stream($g)", g="g1")
+            await (await session.run("x RETURN graph.nodeCount AS nodeCount", graph_name="g1")).single()
+        self.assertIn("graph.relationshipCount", seen[0])
+        self.assertEqual(seen[1], "CALL gds.louvain.stream($g)")
+        self.assertEqual(driver.projected, ["g1", "g1"])
+        self.assertEqual(driver.projection, {"nodeCount": 3, "relationshipCount": 4})
 
 
 class FrozenLedgerV1HashTests(unittest.TestCase):

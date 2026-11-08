@@ -191,17 +191,119 @@ def _run_engine(
     }
 
 
+_PROJECTION_RETURN = "RETURN graph.nodeCount AS nodeCount"
+
+
+class _RecordingResult:
+    def __init__(self, delegate, measurement: dict) -> None:
+        self._delegate = delegate
+        self._measurement = measurement
+
+    async def single(self):
+        record = await self._delegate.single()
+        if record is not None:
+            self._measurement.update(dict(record))
+        return record
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+
+class _RecordingSession:
+    def __init__(self, delegate, driver: "MeasuringDriver") -> None:
+        self._delegate = delegate
+        self._driver = driver
+
+    async def __aenter__(self):
+        await self._delegate.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        return await self._delegate.__aexit__(*args)
+
+    async def run(self, query, **parameters):
+        if _PROJECTION_RETURN in query:
+            self._driver.projected.append(parameters["graph_name"])
+            measured = query.replace(
+                _PROJECTION_RETURN, f"{_PROJECTION_RETURN}, graph.relationshipCount AS relationshipCount"
+            )
+            return _RecordingResult(await self._delegate.run(measured, **parameters), self._driver.projection)
+        return await self._delegate.run(query, **parameters)
+
+
+class MeasuringDriver:
+    """평가 전용 드라이버 래퍼입니다. 운영 Cypher를 바꾸지 않고 실제 투영 규모만 기록합니다."""
+
+    def __init__(self, delegate) -> None:
+        self.delegate = delegate
+        self.projected: list[str] = []
+        self.projection: dict = {}
+
+    def session(self):
+        return _RecordingSession(self.delegate.session(), self)
+
+
+async def _single_query(driver, statement: str):
+    async with driver.session() as session:
+        result = await session.run(statement)
+        return await result.data()
+
+
+async def _measured_analysis(service, analysis) -> dict[str, object]:
+    measuring = MeasuringDriver(service.driver)
+    started = perf_counter()
+    try:
+        response = await analysis(measuring)
+    finally:
+        elapsed = round((perf_counter() - started) * 1000, 3)
+    remaining = {row["graphName"] for row in await _single_query(
+        service.driver, "CALL gds.graph.list() YIELD graphName RETURN graphName"
+    )}
+    return {
+        "response": response,
+        "runtimeMs": elapsed,
+        "projection": measuring.projection,
+        "temporaryGraphsRemaining": len(set(measuring.projected) & remaining),
+    }
+
+
 async def _gds_responses(request: Track1AnalysisRequest, uri: str, password: str):
     from evaluation.track1.legacy_score_v1 import analyze_louvain_v1
     from services.graph_service import GraphService
 
     service = GraphService(uri, "neo4j", password)
+    delegate = service.driver
+
+    async def current_analysis(driver):
+        service.driver = driver
+        try:
+            return await service.analyze_louvain(request)
+        finally:
+            service.driver = delegate
+
     try:
-        legacy = await analyze_louvain_v1(service.driver, request)
-        current = await service.analyze_louvain(request)
+        components = await _single_query(delegate, "CALL dbms.components() YIELD name, versions RETURN name, versions")
+        gds_version = await _single_query(delegate, "RETURN gds.version() AS version")
+        versions = {
+            "neo4j": next(row["versions"][0] for row in components if row["name"] == "Neo4j Kernel"),
+            "gds": gds_version[0]["version"],
+        }
+        legacy = await _measured_analysis(service, lambda driver: analyze_louvain_v1(driver, request))
+        current = await _measured_analysis(service, current_analysis)
     finally:
         await service.close()
-    return legacy, current
+    return versions, legacy, current
+
+
+def _expected_projection(request: Track1AnalysisRequest, version: str) -> dict[str, int]:
+    if version == "score-v1":
+        edges = legacy_edges(request)
+        return {"nodeCount": len({e["source"] for e in edges} | {e["target"] for e in edges}), "edgeCount": len(edges)}
+    graph = build_account_token_graph(request.tickets)
+    return {
+        "nodeCount": graph.node_count, "edgeCount": len(graph.edges),
+        "accountNodes": len(graph.accounts), "tokenNodes": len(graph.tokens), "excludedHubTokens": len(graph.excluded_hubs),
+    }
 
 
 def _gds_rows(request, answer, uri: str | None, password: str | None) -> list[dict[str, object]]:
@@ -212,7 +314,7 @@ def _gds_rows(request, answer, uri: str | None, password: str | None) -> list[di
             for version in ("score-v1", "score-v2")
         ]
     try:
-        legacy, current = asyncio.run(_gds_responses(request, uri, password))
+        versions, legacy, current = asyncio.run(_gds_responses(request, uri, password))
     except Exception as error:
         return [
             {"engine": GDS_ENGINE, "scoreVersion": version, "status": "FAILED", "detail": type(error).__name__}
@@ -221,10 +323,15 @@ def _gds_rows(request, answer, uri: str | None, password: str | None) -> list[di
     return [
         {
             "engine": GDS_ENGINE, "scoreVersion": version, "status": "COMPLETED",
-            "algorithmVersion": response.algorithm_version,
-            **evaluate_clusters(request, answer, response.clusters),
+            "algorithmVersion": measured["response"].algorithm_version,
+            "versions": versions,
+            "runtimeMs": measured["runtimeMs"],
+            "projection": measured["projection"],
+            "expectedProjection": _expected_projection(request, version),
+            "temporaryGraphsRemaining": measured["temporaryGraphsRemaining"],
+            **evaluate_clusters(request, answer, measured["response"].clusters),
         }
-        for version, response in (("score-v1", legacy), ("score-v2", current))
+        for version, measured in (("score-v1", legacy), ("score-v2", current))
     ]
 
 

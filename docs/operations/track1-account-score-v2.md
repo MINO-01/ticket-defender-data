@@ -40,12 +40,13 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 
 - `EVALUATED`는 정책 확인, `COMPLETE`, `NETTED`, `DEDUPLICATED`, 정책 기간 충족에 더해 `quantitySourceVersion`과 `quantityAsOf`가 모두 있을 때만 나온다. 계약은 두 필드를 nullable로 두지만, 출처를 알 수 없는 수량으로 한도를 판정하지 않도록 없으면 `QUANTITY_DATA_INCOMPLETE`로 돌려준다.
 
-### 계약 확인이 필요한 항목 (Backend `15803c1` 재확인, YAML은 `d71e11f`에서 변경 없음)
+### 계약 대조 결과 (Backend `451d2f1`)
 
-- 예시의 `projection-v2;score-v2`와 구현의 `projection-v2-account;score-v2-exp1`이 다르다. 계약은 예시로 표기하며 Spring이 값을 비교하지 않는 전제다.
-- `effectiveUntil`의 경계가 계약과 Backend 코드에 명시되어 있지 않다. 잠정적으로 시작 포함, 종료 제외로 두어 정확히 종료 시각인 구매는 판정하지 않는다(`POLICY_TIME_NOT_APPLICABLE`). Backend 정책 저장값은 시간대 없는 `LocalDateTime`이고 계약은 시간대 있는 `date-time`이므로 변환 기준도 합의가 필요하다.
-- `quantitySourceVersion`, `quantityAsOf`의 필수 여부, `purchasedAt`이 `quantityAsOf`보다 늦은 경우의 처리가 계약에 없다.
-- Spring 쪽 `MacroAnalysisRequest`와 `FastApiAdapter`는 v2 필드를 아직 보내지 않는다.
+- `algorithmVersion` 예시가 구현과 같은 `projection-v2-account;score-v2-exp1`로 갱신됐다.
+- `COMPLETE`는 `quantitySourceVersion`, `quantityAsOf`가 있어야 한다고 명시됐고 구현과 일치한다.
+- `effectiveFrom` 포함, `effectiveUntil` 제외, UTC 시각 변환 기준이 명시됐고 구현과 일치한다.
+- 계약 상태는 여전히 `PROPOSED_FOR_CROSS_REPOSITORY_REVIEW`다. **Spring 소비자는 아직 연결되지 않았다.** `MacroAnalysisRequest`와 `FastApiAdapter`는 v2 필드를 보내지 않고, `purchasedAt`과 `effectiveTicketQuantity`를 공급하는 코드도 없다.
+- `purchasedAt`이 `quantityAsOf`보다 늦은 경우의 처리는 계약에 없다.
 - 정책과 범위 외의 스키마 오류 코드가 `ContractError`에 없어 기존 `{"detail": [{"code": ...}]}` 형식을 유지했다.
 - 같은 `eventId` 안에서 `(accountId, reservationNo, eventId)`는 응답 `members` 식별자이므로 요청 전체에서 중복을 거부한다.
 
@@ -130,6 +131,32 @@ S2, S6, S7, S8의 B3 결과는 두 점수의 후보 커버리지가 같고, S1, 
 | S5 결측 신호 체인 | 1.000 | 0.280 | 0.190 / **0.095** |
 
 S5는 실제 Louvain에서 대상 4건 중 2건만 후보로 남았다. 약한 신호로 이어진 희소 체인이 분할될 때 내부 공유 토큰이 없는 커뮤니티가 제거되기 때문으로 보인다. S5의 Average Precision 1.0은 점수 0인 동점을 ID 순으로 정렬한 영향을 받을 수 있어 회수 성능으로 해석하지 않는다. 이 결과를 보고 `score-v2-exp1`의 가중치와 정답은 바꾸지 않았다. 개선은 새 projection 또는 score 버전의 별도 실험으로 다룬다.
+
+### 포스터용 재실행 (2026-11-09, 커밋 `d5f365d`)
+
+같은 조건의 격리 GDS로 다시 실행해 군집 수, 투영 규모, 패턴별 점수와 순위, 지표가 위 실측과 같음을 확인했다. score-v2 군집은 다음과 같다. 원장 v1과 v2 시험 생성본의 계정 수와 점수는 같고 티켓 수만 다르다.
+
+| 패턴 | 계정 | 티켓 (v1 / v2 시험) | score-v2 | 공유 토큰 (결제, 기기, 주소, IP) |
+| --- | --- | --- | --- | --- |
+| R1 | 6 | 14 / 12 | 1.0 | 1, 1, 1, 1 |
+| R2 | 6 | 13 / 12 | 0.6825 | 3, 2, 0, 0 |
+| R3 | 5 | 14 / 10 | 0.5524 | 1, 1, 1, 1 |
+| N3 | 6 | 7 / 8 | 0.3429 | 1, 0, 0, 0 |
+| N1 | 4 | 4 / 4 | 0.1786 | 0, 0, 1, 1 |
+
+N2 30계정은 IP 허브 제외로 군집이 되지 않는다. 합성 주입 패턴의 시연 값이며 실제 탐지 성능이나 위반 판정이 아니다. v2 원장은 `finalForImport: false`로 최종 반입용이 아니다. v1 원장의 `verify`는 생성기 해시 차이로 FAIL이며 파일 해시와 seed 재현은 통과한다.
+
+## 보안 점검 결과
+
+- 그래프 이름은 요청별 UUID이고 사용자 문자열은 Cypher에 들어가지 않는다. 투영 파라미터는 정수와 실수뿐이다.
+- 임시 그래프는 성공과 실패 모두 정리되고, 격리 GDS에서 영구 쓰기가 없음을 확인했다.
+- v1, v2 경로 모두 본문 수신 전에 `X-TD-Track1-Key`를 검증한다.
+- 범위는 `eventId`(v1) 또는 `performanceId`(v2)로 분리한다. tenant는 요청에 없으며 Spring의 범위 검증과 tenant 범위 HMAC 토큰에 의존한다.
+- **미해결:** Track 1 v1, v2의 `tickets`에 개수 상한이 없고 본문 크기 제한도 없다. Spring `AgentAnalysisRequest`에도 목록 상한이 없다. 내부 인증 뒤의 경로이지만 메모리 사용을 제한하지 못하므로 상한값을 정해 보완해야 한다.
+
+## IEEE-CIS 사용자 보고값
+
+사용자가 로컬에서 측정해 전달한 값이다. 이 저장소 작업에서 재현하지 않았고 합성 평가와 합산하지 않는다. AP는 B0 3.57%, B1 6.26%, B2 3.90%, B3 score-v1 6.61%, B3 score-v2 4.85%로 이 일반 거래 사기 데이터에서는 score-v2가 score-v1보다 낮다. IEEE 어댑터의 계정은 거래별 가상 ID이므로 다계정 탐지 정확도를 뜻하지 않는다.
 
 ## score-v1 기준선과 비교
 

@@ -98,7 +98,7 @@ class Track1GdsIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_versions_and_gds_operations(self):
         dbms = await self.query("CALL dbms.components() YIELD versions RETURN versions")
         gds = await self.query("RETURN gds.version() AS version")
-        self.assertIn("5.20.0", dbms[0]["versions"])
+        self.assertIn("5.19.0", dbms[0]["versions"])
         self.assertEqual(gds[0]["version"], "2.6.6")
 
         procedures = await self.query(

@@ -141,7 +141,7 @@ class GdsIsolationTests(unittest.TestCase):
         container = {
             "Config": {
                 "Labels": {"com.docker.compose.project": "tdissue19gds0123456789", "com.docker.compose.service": "neo4j"},
-                "Image": "neo4j:5.20.0",
+                "Image": "neo4j:5.19.0",
             },
             "Mounts": [{
                 "Type": "bind", "Source": "C:/temp/neo4j-graph-data-science-2.6.6.jar",
@@ -156,7 +156,7 @@ class GdsIsolationTests(unittest.TestCase):
         matching_container = {
             "Config": {
                 "Labels": {"com.docker.compose.project": "tdissue19gds0123456789", "com.docker.compose.service": "neo4j"},
-                "Image": "neo4j:5.20.0",
+                "Image": "neo4j:5.19.0",
             },
             "Mounts": [{
                 "Type": "bind", "Source": "C:/temp/neo4j-graph-data-science-2.6.6.jar",

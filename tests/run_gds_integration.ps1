@@ -12,7 +12,10 @@ param(
 
     # 격리 GDS가 떠 있는 동안 같은 고정 원장으로 score-v1과 score-v2를 비교합니다.
     [string[]]$ComparisonLedgerDir = @(),
-    [string]$ComparisonOutputDir
+    [string]$ComparisonOutputDir,
+
+    # 지정하면 같은 격리 실행에서 S1~S8 B3 평가를 함께 수행합니다.
+    [string]$SyntheticOutputDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,6 +82,11 @@ try {
     foreach ($ledgerDir in $ComparisonLedgerDir) {
         & $python -B -m evaluation.capstone_demo compare --ledger-dir $ledgerDir --output-dir $ComparisonOutputDir --gds-uri $env:TD_GDS_TEST_URI
         if ($LASTEXITCODE -ne 0) { throw 'GDS score comparison failed' }
+    }
+
+    if ($SyntheticOutputDir) {
+        & $python -B -m evaluation.track1 synthetic --output-dir $SyntheticOutputDir --gds-uri $env:TD_GDS_TEST_URI
+        if ($LASTEXITCODE -ne 0) { throw 'GDS synthetic evaluation failed' }
     }
 }
 finally {

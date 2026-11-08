@@ -3,9 +3,94 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+import re
+import subprocess
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from .models import BaselineOutput, EvaluationRecord
+
+
+_ISOLATED_PROJECT_PATTERN = re.compile(r"^tdissue19gds[0-9a-f]{10}$")
+_EXPECTED_GDS_JAR = "td-issue19-gds-2.6.6.jar"
+
+
+def _docker_output(arguments: list[str]) -> str | None:
+    """Read Docker metadata without starting, stopping, or modifying containers."""
+
+    try:
+        completed = subprocess.run(
+            ["docker", *arguments], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def _has_expected_read_only_jar_mount(container: dict) -> bool:
+    """Require the exact read-only GDS test JAR bind mount used by the test script."""
+
+    for mount in container.get("Mounts", []):
+        source = mount.get("Source", "")
+        if (
+            mount.get("Type") == "bind"
+            and mount.get("Destination") == "/plugins/graph-data-science.jar"
+            and mount.get("RW") is False
+            and Path(source).name == _EXPECTED_GDS_JAR
+        ):
+            return True
+    return False
+
+
+def verify_isolated_gds_target(uri: str) -> str | None:
+    """Return a safe-to-disclose failure code unless URI maps to the test Compose container.
+
+    The accepted target is deliberately narrower than a loopback URI: it must be
+    the dynamically mapped Bolt port of the read-only GDS container created by
+    ``tests/run_gds_integration.ps1``. This runs before importing or creating
+    ``GraphService`` and therefore before any Neo4j connection is attempted.
+    """
+
+    try:
+        parsed = urlparse(uri)
+        port = parsed.port
+    except ValueError:
+        return "INVALID_URI"
+    if parsed.scheme not in {"bolt", "neo4j"} or parsed.hostname != "127.0.0.1":
+        return "NON_ISOLATED_HOST"
+    if port is None or port == 7687:
+        return "NON_ISOLATED_PORT"
+
+    container_ids = _docker_output([
+        "container", "ls", "--quiet", "--filter", "label=com.docker.compose.service=neo4j",
+    ])
+    if not container_ids:
+        return "NO_VERIFIED_GDS_CONTAINER"
+    raw_inspect = _docker_output(["container", "inspect", *container_ids.split()])
+    if not raw_inspect:
+        return "NO_VERIFIED_GDS_CONTAINER"
+    try:
+        containers = json.loads(raw_inspect)
+    except json.JSONDecodeError:
+        return "NO_VERIFIED_GDS_CONTAINER"
+
+    verified = []
+    for container in containers:
+        labels = container.get("Config", {}).get("Labels", {}) or {}
+        project = labels.get("com.docker.compose.project", "")
+        if (
+            labels.get("com.docker.compose.service") != "neo4j"
+            or not _ISOLATED_PROJECT_PATTERN.fullmatch(project)
+            or container.get("Config", {}).get("Image") != "neo4j:5.12.0"
+            or not _has_expected_read_only_jar_mount(container)
+        ):
+            continue
+        mappings = container.get("NetworkSettings", {}).get("Ports", {}).get("7687/tcp") or []
+        if any(mapping.get("HostIp") == "127.0.0.1" and mapping.get("HostPort") == str(port) for mapping in mappings):
+            verified.append(container)
+    return None if len(verified) == 1 else "NO_VERIFIED_GDS_CONTAINER"
 
 
 async def _run_existing_louvain(
@@ -73,6 +158,14 @@ def b3_existing_gds_louvain(
             status="SKIPPED_GDS_ISOLATION",
             scores={record.ticket_id: 0.0 for record in records},
             detail="Set an isolated GDS URI and password to run B3.",
+        )
+    isolation_failure = verify_isolated_gds_target(uri)
+    if isolation_failure is not None:
+        return BaselineOutput(
+            name="B3_GDS_LOUVAIN",
+            status="SKIPPED_GDS_ISOLATION",
+            scores={record.ticket_id: 0.0 for record in records},
+            detail=f"GDS isolation verification failed: {isolation_failure}",
         )
     try:
         return asyncio.run(_run_existing_louvain(records, uri, password))

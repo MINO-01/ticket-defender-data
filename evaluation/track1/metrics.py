@@ -115,10 +115,11 @@ def evaluate(dataset: EvaluationDataset, output: BaselineOutput) -> dict[str, Me
     false_candidates = sum(1 for ticket_id in selected_one if ticket_id in normal_shared and not labels.get(ticket_id, 0))
     result["normal_shared_false_candidates"] = false_candidates if k_one else None
     result["normal_shared_false_candidate_rate"] = (false_candidates / len(normal_shared)) if normal_shared and k_one else None
-    if output.cluster_labels is None:
+    groups = dataset.truth.relationship_groups
+    if output.cluster_labels is None or any(ticket_id not in groups for ticket_id in ranking):
         result.update({"ari": None, "nmi": None})
     else:
-        truth_groups = [dataset.truth.relationship_groups[ticket_id] for ticket_id in ranking]
+        truth_groups = [groups[ticket_id] for ticket_id in ranking]
         output_groups = [output.cluster_labels.get(ticket_id, f"singleton-{ticket_id}") for ticket_id in ranking]
         result["ari"] = _adjusted_rand_index(truth_groups, output_groups)
         result["nmi"] = _normalized_mutual_information(truth_groups, output_groups)

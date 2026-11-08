@@ -2,11 +2,14 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from evaluation.track1.baselines import b0_random, b1_shared_signal_rule, b2_wcc
+from evaluation.track1 import gds
 from evaluation.track1.gds import b3_existing_gds_louvain
 from evaluation.track1.ieee import holdout_test_dataset, load_ieee_cis
 from evaluation.track1.metrics import evaluate
+from evaluation.track1.models import BaselineOutput
 from evaluation.track1.results import write_results
 from evaluation.track1.synthetic import build_synthetic_suite
 
@@ -80,11 +83,72 @@ class IeeeAdapterTests(unittest.TestCase):
         heldout = holdout_test_dataset(dataset, split)
         self.assertEqual(len(heldout.records), 3)
         self.assertEqual(heldout.truth.investigation_labels["ieee-1019"], 1)
+        # IEEE-CIS supplies transaction labels, not a relationship-group truth.
+        # B2 still emits cluster labels, so this must not attempt an ARI/NMI lookup.
+        evaluated = evaluate(heldout, b2_wcc(heldout.records))
+        self.assertIsNone(evaluated["ari"])
+        self.assertIsNone(evaluated["nmi"])
+        self.assertIsNotNone(evaluated["average_precision"])
+        self.assertIsNotNone(evaluated["candidate_coverage"])
 
     def test_output_cannot_be_written_inside_repository(self):
         repository = Path(__file__).resolve().parents[1]
         with self.assertRaises(ValueError):
             write_results(repository=repository, output_dir=repository / "evaluation-results", run_name="test", status="COMPLETED", rows=[], metadata={})
+
+
+class GdsIsolationTests(unittest.TestCase):
+    def setUp(self):
+        self.records = build_synthetic_suite()[0].records
+
+    def test_missing_uri_or_password_skips_without_louvain_runner(self):
+        with patch("evaluation.track1.gds._run_existing_louvain", new_callable=AsyncMock) as runner:
+            self.assertEqual(b3_existing_gds_louvain(self.records, uri=None, password="password").status, "SKIPPED_GDS_ISOLATION")
+            self.assertEqual(b3_existing_gds_louvain(self.records, uri="bolt://127.0.0.1:9000", password=None).status, "SKIPPED_GDS_ISOLATION")
+            runner.assert_not_called()
+
+    def test_remote_and_default_port_are_blocked_before_docker_or_louvain(self):
+        with patch("evaluation.track1.gds._docker_output") as docker, patch(
+            "evaluation.track1.gds._run_existing_louvain", new_callable=AsyncMock
+        ) as runner:
+            for uri in ("bolt://db.example.test:9000", "bolt://localhost:7687", "bolt://127.0.0.1:7687"):
+                output = b3_existing_gds_louvain(self.records, uri=uri, password="password")
+                self.assertEqual(output.status, "SKIPPED_GDS_ISOLATION")
+            docker.assert_not_called()
+            runner.assert_not_called()
+
+    def test_unverified_container_skips_before_louvain_runner(self):
+        with patch("evaluation.track1.gds.verify_isolated_gds_target", return_value="NO_VERIFIED_GDS_CONTAINER"), patch(
+            "evaluation.track1.gds._run_existing_louvain", new_callable=AsyncMock
+        ) as runner:
+            output = b3_existing_gds_louvain(self.records, uri="bolt://127.0.0.1:19001", password="password")
+            self.assertEqual(output.status, "SKIPPED_GDS_ISOLATION")
+            self.assertIn("NO_VERIFIED_GDS_CONTAINER", output.detail)
+            runner.assert_not_called()
+
+    def test_verified_compose_container_keeps_existing_louvain_path(self):
+        expected = BaselineOutput("B3_GDS_LOUVAIN", "COMPLETED", {record.ticket_id: 0.0 for record in self.records})
+        with patch("evaluation.track1.gds.verify_isolated_gds_target", return_value=None), patch(
+            "evaluation.track1.gds._run_existing_louvain", new_callable=AsyncMock, return_value=expected
+        ) as runner:
+            output = b3_existing_gds_louvain(self.records, uri="bolt://127.0.0.1:19001", password="password")
+            self.assertIs(output, expected)
+            runner.assert_awaited_once_with(self.records, "bolt://127.0.0.1:19001", "password")
+
+    def test_verifier_accepts_only_matching_compose_metadata(self):
+        container = {
+            "Config": {
+                "Labels": {"com.docker.compose.project": "tdissue19gds0123456789", "com.docker.compose.service": "neo4j"},
+                "Image": "neo4j:5.12.0",
+            },
+            "Mounts": [{
+                "Type": "bind", "Source": "C:/temp/td-issue19-gds-2.6.6.jar",
+                "Destination": "/plugins/graph-data-science.jar", "RW": False,
+            }],
+            "NetworkSettings": {"Ports": {"7687/tcp": [{"HostIp": "127.0.0.1", "HostPort": "19001"}]}},
+        }
+        with patch("evaluation.track1.gds._docker_output", side_effect=["container-id\n", __import__("json").dumps([container])]):
+            self.assertIsNone(gds.verify_isolated_gds_target("bolt://127.0.0.1:19001"))
 
 
 if __name__ == "__main__":

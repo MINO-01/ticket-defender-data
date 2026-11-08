@@ -2,7 +2,10 @@ from datetime import datetime
 from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, WithJsonSchema, model_validator
+from pydantic import (
+    AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, StringConstraints, WithJsonSchema,
+    model_validator,
+)
 from pydantic_core import PydanticCustomError
 
 # 매크로 조직망 탐지 DTO
@@ -68,6 +71,10 @@ class Track1TicketInput(BaseModel):
     def key(self) -> tuple[str, str, str]:
         return self.account_id, self.reservation_no, self.event_id
 
+    @property
+    def analysis_scope(self) -> str:
+        return self.event_id
+
 
 class Track1AnalysisRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -112,6 +119,154 @@ class Track1AnalysisResponse(BaseModel):
     algorithm_version: str = Field(min_length=1, alias="algorithmVersion")
     analyzed_at: datetime = Field(alias="analyzedAt")
     clusters: List[Track1Cluster]
+
+
+# Backend docs/api/track1-purchase-limit-analysis-v2.yaml 계약의 DTO입니다.
+# 계약 상태는 PROPOSED_FOR_CROSS_REPOSITORY_REVIEW이며 Spring 연동 검증 전입니다.
+PolicyVersion = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+PositiveQuantity = Annotated[StrictInt, Field(ge=1)]
+
+
+class Track1ConfirmedPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tickets_per_account: PositiveQuantity = Field(alias="maxTicketsPerAccount")
+    policy_version: PolicyVersion = Field(alias="policyVersion")
+    effective_from: AwareDatetime = Field(alias="effectiveFrom")
+    effective_until: Optional[AwareDatetime] = Field(default=None, alias="effectiveUntil")
+
+    @model_validator(mode="after")
+    def validate_policy(self):
+        if not self.policy_version.strip():
+            raise PydanticCustomError("INVALID_POLICY", "policyVersion must not be blank")
+        if self.effective_until is not None and self.effective_until <= self.effective_from:
+            raise PydanticCustomError("POLICY_TIME_INVALID", "effectiveUntil must be after effectiveFrom")
+        return self
+
+    def applies_at(self, moment: datetime) -> bool:
+        """시작 시각은 포함하고 종료 시각은 제외한 구간으로 판단합니다."""
+
+        return self.effective_from <= moment and (self.effective_until is None or moment < self.effective_until)
+
+
+class Track1PerformanceScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    internal_event_id: UUIDText = Field(alias="internalEventId")
+    event_id: TicketIdentifier = Field(alias="eventId")
+    performance_id: UUIDText = Field(alias="performanceId")
+    policy_verification_status: Literal["CONFIRMED", "POLICY_NOT_CONFIRMED"] = Field(alias="policyVerificationStatus")
+    policy: Optional[Track1ConfirmedPolicy] = None
+    quantity_data_status: Literal["COMPLETE", "INCOMPLETE", "UNKNOWN"] = Field(alias="quantityDataStatus")
+    quantity_source_version: Optional[Annotated[str, StringConstraints(max_length=128)]] = Field(
+        default=None, alias="quantitySourceVersion"
+    )
+    quantity_as_of: Optional[AwareDatetime] = Field(default=None, alias="quantityAsOf")
+    cancellation_handling: Literal["NETTED", "NOT_CONFIRMED"] = Field(alias="cancellationHandling")
+    duplicate_handling: Literal["DEDUPLICATED", "NOT_CONFIRMED"] = Field(alias="duplicateHandling")
+    data_completeness_reason: Optional[Annotated[str, StringConstraints(max_length=512)]] = Field(
+        default=None, alias="dataCompletenessReason"
+    )
+
+    @model_validator(mode="after")
+    def validate_policy_status(self):
+        if (self.policy_verification_status == "CONFIRMED") != (self.policy is not None):
+            raise PydanticCustomError("INVALID_POLICY", "policy must match policyVerificationStatus")
+        return self
+
+    @property
+    def quantity_is_complete(self) -> bool:
+        return (
+            self.quantity_data_status == "COMPLETE"
+            and self.cancellation_handling == "NETTED"
+            and self.duplicate_handling == "DEDUPLICATED"
+        )
+
+
+class Track1LimitTicketInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: TicketIdentifier = Field(alias="accountId")
+    reservation_no: TicketIdentifier = Field(alias="reservationNo")
+    event_id: TicketIdentifier = Field(alias="eventId")
+    performance_id: UUIDText = Field(alias="performanceId")
+    purchased_at: AwareDatetime = Field(alias="purchasedAt")
+    effective_ticket_quantity: PositiveQuantity = Field(alias="effectiveTicketQuantity")
+    payment_hash: Optional[HashToken] = Field(default=None, alias="paymentHash")
+    address_hash: Optional[HashToken] = Field(default=None, alias="addressHash")
+    device_id_hash: Optional[HashToken] = Field(default=None, alias="deviceIdHash")
+    ip_hash: Optional[HashToken] = Field(default=None, alias="ipHash")
+
+    @model_validator(mode="after")
+    def validate_ticket(self):
+        if not all((self.account_id.strip(), self.reservation_no.strip(), self.event_id.strip())):
+            raise PydanticCustomError("invalid_identifier", "Ticket identifiers must not be blank")
+        return self
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return self.account_id, self.reservation_no, self.event_id
+
+    @property
+    def analysis_scope(self) -> str:
+        return self.performance_id.lower()
+
+
+class Track1LimitAnalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUIDText = Field(alias="requestId")
+    performance_scopes: List[Track1PerformanceScope] = Field(min_length=1, alias="performanceScopes")
+    tickets: List[Track1LimitTicketInput] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_scopes(self):
+        scope_events = {}
+        for scope in self.performance_scopes:
+            performance_id = scope.performance_id.lower()
+            if performance_id in scope_events:
+                raise PydanticCustomError("DUPLICATE_PERFORMANCE_SCOPE", "performance scope must be unique")
+            scope_events[performance_id] = scope.event_id
+        for ticket in self.tickets:
+            if scope_events.get(ticket.analysis_scope) != ticket.event_id:
+                raise PydanticCustomError("TICKET_SCOPE_MISMATCH", "ticket must match one performance scope")
+        keys = [ticket.key for ticket in self.tickets]
+        if len(keys) != len(set(keys)):
+            raise PydanticCustomError("duplicate_ticket", "Duplicate ticket identifiers are not allowed")
+        return self
+
+
+class Track1ReservationQuantity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reservation_no: TicketIdentifier = Field(alias="reservationNo")
+    effective_ticket_quantity: PositiveQuantity = Field(alias="effectiveTicketQuantity")
+
+
+class Track1AccountLimitFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: TicketIdentifier = Field(alias="accountId")
+    effective_ticket_quantity: PositiveQuantity = Field(alias="effectiveTicketQuantity")
+    max_tickets_per_account: PositiveQuantity = Field(alias="maxTicketsPerAccount")
+    policy_version: PolicyVersion = Field(alias="policyVersion")
+    reservation_quantities: List[Track1ReservationQuantity] = Field(min_length=1, alias="reservationQuantities")
+
+
+class Track1PurchaseLimitEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    internal_event_id: UUIDText = Field(alias="internalEventId")
+    event_id: TicketIdentifier = Field(alias="eventId")
+    performance_id: UUIDText = Field(alias="performanceId")
+    status: Literal["EVALUATED", "POLICY_NOT_CONFIRMED", "QUANTITY_DATA_INCOMPLETE", "POLICY_TIME_NOT_APPLICABLE"]
+    policy_version: Optional[PolicyVersion] = Field(alias="policyVersion")
+    account_limit_findings: List[Track1AccountLimitFinding] = Field(alias="accountLimitFindings")
+
+
+class Track1LimitAnalysisResponse(Track1AnalysisResponse):
+    purchase_limit_evaluations: List[Track1PurchaseLimitEvaluation] = Field(alias="purchaseLimitEvaluations")
+
 
 # VLM 제보 파싱 DTO
 class VLMParsedData(BaseModel):

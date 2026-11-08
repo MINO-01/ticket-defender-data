@@ -176,10 +176,15 @@ class Track1PerformanceScope(BaseModel):
 
     @property
     def quantity_is_complete(self) -> bool:
+        """수량 출처와 기준 시각까지 확인된 경우에만 완전한 수량으로 봅니다."""
+
         return (
             self.quantity_data_status == "COMPLETE"
             and self.cancellation_handling == "NETTED"
             and self.duplicate_handling == "DEDUPLICATED"
+            and self.quantity_source_version is not None
+            and bool(self.quantity_source_version.strip())
+            and self.quantity_as_of is not None
         )
 
 

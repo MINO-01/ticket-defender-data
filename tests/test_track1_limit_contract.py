@@ -168,6 +168,50 @@ class LimitContractTests(unittest.TestCase):
                 result = self.evaluation(body([ticket(quantity=9, paymentHash=PAY)], [scope(**{field: value})]))
                 self.assertEqual(result["status"], "QUANTITY_DATA_INCOMPLETE")
 
+    def test_unknown_quantity_source_is_never_evaluated(self):
+        for field, value in (
+            ("quantitySourceVersion", None), ("quantitySourceVersion", "   "), ("quantityAsOf", None),
+        ):
+            with self.subTest(field=field, value=value):
+                result = self.evaluation(body([ticket(quantity=9, paymentHash=PAY)], [scope(**{field: value})]))
+                self.assertEqual(result["status"], "QUANTITY_DATA_INCOMPLETE")
+                self.assertEqual(result["accountLimitFindings"], [])
+
+    def test_omitted_quantity_source_fields_are_never_evaluated(self):
+        value = scope()
+        del value["quantitySourceVersion"], value["quantityAsOf"]
+        result = self.evaluation(body([ticket(quantity=9, paymentHash=PAY)], [value]))
+        self.assertEqual(result["status"], "QUANTITY_DATA_INCOMPLETE")
+
+    def test_policy_interval_boundaries(self):
+        """시작 시각은 평가하고 종료 시각은 판정하지 않는 잠정 경계입니다."""
+
+        limited = policy(until="2026-11-05T00:00:00Z")
+        for purchased, status in (
+            ("2026-11-01T00:00:00Z", "EVALUATED"),
+            ("2026-11-04T23:59:59Z", "EVALUATED"),
+            ("2026-11-05T08:59:59+09:00", "EVALUATED"),
+            ("2026-11-05T09:00:00+09:00", "POLICY_TIME_NOT_APPLICABLE"),
+        ):
+            with self.subTest(purchased=purchased):
+                payload = body([ticket(quantity=3, purchased=purchased, paymentHash=PAY)], [scope(policy_value=limited)])
+                self.assertEqual(self.evaluation(payload)["status"], status)
+
+    def test_one_outside_interval_blocks_whole_scope(self):
+        payload = body([
+            ticket("a", "r1", quantity=9, paymentHash=PAY),
+            ticket("b", "r2", quantity=9, purchased="2026-10-01T00:00:00Z", deviceIdHash=DEV),
+        ])
+        self.assertEqual(self.evaluation(payload)["status"], "POLICY_TIME_NOT_APPLICABLE")
+
+    def test_finding_has_exact_contract_fields_and_v2_error_shape(self):
+        finding = self.evaluation(body([ticket(quantity=3, paymentHash=PAY)]))["accountLimitFindings"][0]
+        self.assertEqual(set(finding), {
+            "accountId", "effectiveTicketQuantity", "maxTicketsPerAccount", "policyVersion", "reservationQuantities",
+        })
+        error = self.post(body([ticket(event="other", paymentHash=PAY)])).json()
+        self.assertEqual(set(error), {"code", "detail"})
+
     def test_purchase_outside_policy_interval_is_not_applicable(self):
         for purchased in ("2026-10-31T23:59:59Z", "2026-11-05T00:00:00Z"):
             with self.subTest(purchased=purchased):

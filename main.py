@@ -33,6 +33,27 @@ app = FastAPI(
 )
 
 
+TRACK1_V2_PATH = "/api/v2/clusters/analyze"
+_TRACK1_V2_CONTRACT_DETAILS = {
+    "DUPLICATE_PERFORMANCE_SCOPE": "Each performance scope must be unique",
+    "TICKET_SCOPE_MISMATCH": "Each ticket must reference exactly one matching performance scope",
+    "POLICY_TIME_INVALID": "effectiveUntil must be after effectiveFrom",
+    "INVALID_POLICY": "Policy does not match the contract",
+}
+
+
+def _track1_v2_contract_error(errors) -> dict | None:
+    """계약에 정의된 범위와 정책 오류만 ContractError로 돌려줍니다. 입력값은 담지 않습니다."""
+
+    types = {error["type"] for error in errors}
+    for code, detail in _TRACK1_V2_CONTRACT_DETAILS.items():
+        if code in types:
+            return {"code": code, "detail": detail}
+    if any("policy" in error["loc"] for error in errors):
+        return {"code": "INVALID_POLICY", "detail": _TRACK1_V2_CONTRACT_DETAILS["INVALID_POLICY"]}
+    return None
+
+
 @app.exception_handler(RequestValidationError)
 async def track1_validation_error(request: Request, exc: RequestValidationError):
     if request.url.path in VLM_PATHS:
@@ -46,8 +67,12 @@ async def track1_validation_error(request: Request, exc: RequestValidationError)
             VLMProblem(422, "INVALID_REQUEST", "Invalid request", "Request does not match the contract")
         )
         return problem_response(problem, request.state.request_id)
-    if request.url.path != "/api/v1/clusters/analyze":
+    if request.url.path not in {"/api/v1/clusters/analyze", TRACK1_V2_PATH}:
         return await request_validation_exception_handler(request, exc)
+    if request.url.path == TRACK1_V2_PATH:
+        contract_error = _track1_v2_contract_error(exc.errors())
+        if contract_error is not None:
+            return JSONResponse(status_code=422, content=contract_error)
 
     token_fields = {"paymentHash", "addressHash", "deviceIdHash", "ipHash"}
     identifier_fields = {"accountId", "reservationNo", "eventId"}
@@ -95,4 +120,5 @@ app.add_middleware(VLMPreBodyGate)
 app.add_middleware(Track1AuthGate)
 
 app.include_router(graph_routes.router, prefix="/api/v1")
+app.include_router(graph_routes.v2_router, prefix="/api/v2")
 app.include_router(vlm_routes.router, prefix="/api/v1")

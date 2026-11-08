@@ -16,7 +16,7 @@ TRACK1_AUTH_HEADER = b"x-td-track1-key"
 TRACK1_SECRET_ENV = "TRACK1_INTERNAL_SHARED_SECRET"
 TRACK2_SECRET_ENV = "VLM_INTERNAL_SHARED_SECRET"
 TRACK1_MIN_SECRET_BYTES = 32
-TRACK1_PROTECTED_PATHS = frozenset({"/api/v1/clusters/analyze"})
+TRACK1_PROTECTED_PATHS = frozenset({"/api/v1/clusters/analyze", "/api/v2/clusters/analyze"})
 
 
 def _is_protected(scope) -> bool:

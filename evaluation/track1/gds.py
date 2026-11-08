@@ -14,7 +14,9 @@ from .models import BaselineOutput, EvaluationRecord
 
 
 _ISOLATED_PROJECT_PATTERN = re.compile(r"^tdissue19gds[0-9a-f]{10}$")
-_EXPECTED_GDS_JAR = "td-issue19-gds-2.6.6.jar"
+# 공식 배포물 이름입니다. 진위는 이름이 아니라 실행 스크립트의 SHA-256 확인으로 판단합니다.
+_EXPECTED_GDS_JAR = "neo4j-graph-data-science-2.6.6.jar"
+_EXPECTED_NEO4J_IMAGE = "neo4j:5.20.0"
 B3_LEGACY_V1_NAME = "B3_GDS_LOUVAIN_LEGACY_SCORE_V1"
 
 
@@ -84,7 +86,7 @@ def verify_isolated_gds_target(uri: str) -> str | None:
         if (
             labels.get("com.docker.compose.service") != "neo4j"
             or not _ISOLATED_PROJECT_PATTERN.fullmatch(project)
-            or container.get("Config", {}).get("Image") != "neo4j:5.12.0"
+            or container.get("Config", {}).get("Image") != _EXPECTED_NEO4J_IMAGE
             or not _has_expected_read_only_jar_mount(container)
         ):
             continue

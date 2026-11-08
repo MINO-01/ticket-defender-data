@@ -22,8 +22,8 @@ $composeFile = Join-Path $PSScriptRoot 'docker-compose.gds.yml'
 $python = if ($PythonPath) { (Resolve-Path -LiteralPath $PythonPath).Path } else { Join-Path $repository 'venv\Scripts\python.exe' }
 $project = 'tdissue19gds' + [guid]::NewGuid().ToString('N').Substring(0, 10)
 
-if ((Split-Path -Leaf $resolvedJar) -ne 'td-issue19-gds-2.6.6.jar') {
-    throw 'Expected the isolated GDS 2.6.6 test JAR'
+if ((Split-Path -Leaf $resolvedJar) -ne 'neo4j-graph-data-science-2.6.6.jar') {
+    throw 'Expected the official GDS 2.6.6 JAR file name'
 }
 if ((Get-FileHash -LiteralPath $resolvedJar -Algorithm SHA256).Hash -ne $ExpectedJarSha256.ToUpperInvariant()) {
     throw 'GDS JAR SHA-256 does not match the expected value'

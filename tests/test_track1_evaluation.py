@@ -141,10 +141,10 @@ class GdsIsolationTests(unittest.TestCase):
         container = {
             "Config": {
                 "Labels": {"com.docker.compose.project": "tdissue19gds0123456789", "com.docker.compose.service": "neo4j"},
-                "Image": "neo4j:5.12.0",
+                "Image": "neo4j:5.20.0",
             },
             "Mounts": [{
-                "Type": "bind", "Source": "C:/temp/td-issue19-gds-2.6.6.jar",
+                "Type": "bind", "Source": "C:/temp/neo4j-graph-data-science-2.6.6.jar",
                 "Destination": "/plugins/graph-data-science.jar", "RW": False,
             }],
             "NetworkSettings": {"Ports": {"7687/tcp": [{"HostIp": "127.0.0.1", "HostPort": "19001"}]}},
@@ -156,10 +156,10 @@ class GdsIsolationTests(unittest.TestCase):
         matching_container = {
             "Config": {
                 "Labels": {"com.docker.compose.project": "tdissue19gds0123456789", "com.docker.compose.service": "neo4j"},
-                "Image": "neo4j:5.12.0",
+                "Image": "neo4j:5.20.0",
             },
             "Mounts": [{
-                "Type": "bind", "Source": "C:/temp/td-issue19-gds-2.6.6.jar",
+                "Type": "bind", "Source": "C:/temp/neo4j-graph-data-science-2.6.6.jar",
                 "Destination": "/plugins/graph-data-science.jar", "RW": False,
             }],
             "NetworkSettings": {"Ports": {"7687/tcp": [{"HostIp": "127.0.0.1", "HostPort": "19001"}]}},
@@ -172,7 +172,7 @@ class GdsIsolationTests(unittest.TestCase):
         wrong_project["Config"]["Labels"]["com.docker.compose.project"] = "ticket-fraud-neo4j"
         cases.append(("wrong_project", [wrong_project]))
         wrong_image = copy.deepcopy(matching_container)
-        wrong_image["Config"]["Image"] = "neo4j:5.13.0"
+        wrong_image["Config"]["Image"] = "neo4j:5.12.0"
         cases.append(("wrong_image", [wrong_image]))
         wrong_port = copy.deepcopy(matching_container)
         wrong_port["NetworkSettings"]["Ports"]["7687/tcp"][0]["HostPort"] = "19002"

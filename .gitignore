@@ -22,3 +22,16 @@ Thumbs.db
 
 neo4j_data/
 neo4j_logs/
+
+# Private benchmark inputs and locally generated aggregate evaluation outputs.
+# Keep these paths outside the repository by default; never commit IEEE-CIS sources,
+# labels, archives, credentials, or ad-hoc result exports.
+private-data/
+ieee-cis/
+evaluation-results/
+train_transaction.zip
+train_identity.zip
+train_transaction.parquet
+train_identity.parquet
+train_transaction.jsonl
+train_identity.jsonl

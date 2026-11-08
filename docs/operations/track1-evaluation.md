@@ -32,7 +32,7 @@ python -m evaluation.track1 synthetic
 python -m evaluation.track1 synthetic --output-dir D:\ticket-defender-private-results
 ```
 
-GDS B3는 기존 운영 Neo4j가 아니라 `tests/run_gds_integration.ps1` 방식의 격리 GDS만 명시 연결한다. URI와 비밀번호가 있어도, `tdissue19gds` 프로젝트 라벨, `neo4j` 서비스 라벨, 동적으로 매핑된 127.0.0.1 Bolt 포트, 읽기 전용 `td-issue19-gds-2.6.6.jar` 마운트가 Docker inspect에서 모두 일치해야 한다. 기본 7687 포트·원격/서비스명 URI·검증 실패는 접속 전에 `SKIPPED_GDS_ISOLATION`으로 끝나며 대체 구현을 Louvain이라고 부르지 않는다.
+GDS B3는 기존 운영 Neo4j가 아니라 `tests/run_gds_integration.ps1` 방식의 격리 GDS만 명시 연결한다. URI와 비밀번호가 있어도, `tdissue19gds` 프로젝트 라벨, `neo4j` 서비스 라벨, 동적으로 매핑된 127.0.0.1 Bolt 포트, `neo4j:5.20.0` 이미지, 읽기 전용 `neo4j-graph-data-science-2.6.6.jar` 마운트가 Docker inspect에서 모두 일치해야 한다. 기본 7687 포트, 원격/서비스명 URI, 검증 실패는 접속 전에 `SKIPPED_GDS_ISOLATION`으로 끝나며 대체 구현을 Louvain이라고 부르지 않는다.
 
 ```powershell
 $env:TD_GDS_TEST_PASSWORD = "<isolated-test-password>"

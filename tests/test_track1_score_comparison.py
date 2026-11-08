@@ -268,6 +268,15 @@ class FixedKMetricTests(unittest.TestCase):
         self.assertEqual(result["candidateSummary"]["n3AsNegative"], {"selectedCount": 6, "candidatePrecision": 4 / 6})
         self.assertEqual(result["patternTable"]["N3"]["detectedAccounts"], 2)
 
+    def test_cluster_summary_is_aggregate_without_identifiers(self):
+        result = evaluate_clusters(self.request, self.answer, self.clusters(range(6)))
+        self.assertEqual(result["clusterSummary"], [{
+            "accounts": 6, "tickets": 6, "riskScore": 0.5, "patternAccounts": {"N1": 2, "R1": 4},
+            "sharedTokens": {"payment": 1, "device": 0, "address": 0, "ip": 0},
+        }])
+        self.assertNotIn("a00", json.dumps(result["clusterSummary"]))
+        self.assertNotIn("a" * 64, json.dumps(result["clusterSummary"]))
+
     def test_normal_shared_rate_uses_all_normal_shared_accounts(self):
         result = evaluate_clusters(self.request, self.answer, self.clusters(range(5)))
         row = self.at(result, "binaryExcludingN3", 10)

@@ -8,7 +8,7 @@ Louvain 행은 SKIPPED_GDS_ISOLATION으로 남깁니다. OFFLINE_WCC_PROXY는 �
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -134,6 +134,25 @@ def _candidate_summary(
     }
 
 
+def _cluster_summary(clusters: Sequence[Track1Cluster], patterns: Mapping[str, str]) -> list[dict[str, object]]:
+    """군집별 규모와 정답 패턴 구성을 집계합니다. 계정, 예매, 토큰 값은 담지 않습니다."""
+
+    rows = []
+    for cluster in sorted(clusters, key=lambda item: (-item.risk_score, item.cluster_id)):
+        accounts = {member.account_id for member in cluster.members}
+        rows.append({
+            "accounts": len(accounts),
+            "tickets": len(cluster.members),
+            "riskScore": cluster.risk_score,
+            "patternAccounts": dict(sorted(Counter(patterns.get(account, "UNLABELED") for account in accounts).items())),
+            "sharedTokens": {
+                "payment": len(cluster.payment_hashes), "device": len(cluster.device_id_hashes),
+                "address": len(cluster.address_hashes), "ip": len(cluster.ip_hashes),
+            },
+        })
+    return rows
+
+
 def evaluate_clusters(
     request: Track1AnalysisRequest, answer: Mapping, clusters: Sequence[Track1Cluster]
 ) -> dict[str, object]:
@@ -166,6 +185,7 @@ def evaluate_clusters(
     independent_flagged = sum(1 for account, value in scores.items() if value > 0 and account not in patterns)
     return {
         "clusterCount": len(clusters),
+        "clusterSummary": _cluster_summary(clusters, patterns),
         "singleAccountClusterCount": multi_ticket_only,
         "independentAccountsFlagged": independent_flagged,
         "binaryExcludingN3": [_at_k(without_n3, scores, patterns, k, positives, normal_total) for k in K_VALUES],

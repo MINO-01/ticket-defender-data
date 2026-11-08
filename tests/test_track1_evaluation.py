@@ -1,4 +1,6 @@
 import csv
+import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -147,8 +149,53 @@ class GdsIsolationTests(unittest.TestCase):
             }],
             "NetworkSettings": {"Ports": {"7687/tcp": [{"HostIp": "127.0.0.1", "HostPort": "19001"}]}},
         }
-        with patch("evaluation.track1.gds._docker_output", side_effect=["container-id\n", __import__("json").dumps([container])]):
+        with patch("evaluation.track1.gds._docker_output", side_effect=["container-id\n", json.dumps([container])]):
             self.assertIsNone(gds.verify_isolated_gds_target("bolt://127.0.0.1:19001"))
+
+    def test_verifier_rejects_near_matching_compose_metadata(self):
+        matching_container = {
+            "Config": {
+                "Labels": {"com.docker.compose.project": "tdissue19gds0123456789", "com.docker.compose.service": "neo4j"},
+                "Image": "neo4j:5.12.0",
+            },
+            "Mounts": [{
+                "Type": "bind", "Source": "C:/temp/td-issue19-gds-2.6.6.jar",
+                "Destination": "/plugins/graph-data-science.jar", "RW": False,
+            }],
+            "NetworkSettings": {"Ports": {"7687/tcp": [{"HostIp": "127.0.0.1", "HostPort": "19001"}]}},
+        }
+        cases = []
+        read_write_mount = copy.deepcopy(matching_container)
+        read_write_mount["Mounts"][0]["RW"] = True
+        cases.append(("read_write_jar", [read_write_mount]))
+        wrong_project = copy.deepcopy(matching_container)
+        wrong_project["Config"]["Labels"]["com.docker.compose.project"] = "ticket-fraud-neo4j"
+        cases.append(("wrong_project", [wrong_project]))
+        wrong_image = copy.deepcopy(matching_container)
+        wrong_image["Config"]["Image"] = "neo4j:5.13.0"
+        cases.append(("wrong_image", [wrong_image]))
+        wrong_port = copy.deepcopy(matching_container)
+        wrong_port["NetworkSettings"]["Ports"]["7687/tcp"][0]["HostPort"] = "19002"
+        cases.append(("wrong_port", [wrong_port]))
+        cases.append(("multiple_matches", [copy.deepcopy(matching_container), copy.deepcopy(matching_container)]))
+
+        for name, containers in cases:
+            with self.subTest(name=name):
+                container_ids = "\n".join(f"container-{index}" for index in range(len(containers))) + "\n"
+                inspect = json.dumps(containers)
+                with patch("evaluation.track1.gds._docker_output", side_effect=[container_ids, inspect]):
+                    self.assertEqual(
+                        gds.verify_isolated_gds_target("bolt://127.0.0.1:19001"),
+                        "NO_VERIFIED_GDS_CONTAINER",
+                    )
+                with patch("evaluation.track1.gds._docker_output", side_effect=[container_ids, inspect]), patch(
+                    "evaluation.track1.gds._run_existing_louvain", new_callable=AsyncMock
+                ) as runner:
+                    output = b3_existing_gds_louvain(
+                        self.records, uri="bolt://127.0.0.1:19001", password="password"
+                    )
+                    self.assertEqual(output.status, "SKIPPED_GDS_ISOLATION")
+                    runner.assert_not_called()
 
 
 if __name__ == "__main__":

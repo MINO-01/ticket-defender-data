@@ -1,6 +1,6 @@
 # Track 1 계정 단위 분석과 score-v2
 
-상태: Data 구현 완료, 실측 GDS 평가 미수행, Backend v2 계약 `PROPOSED_FOR_CROSS_REPOSITORY_REVIEW`.
+상태: Data 구현 완료, 격리 GDS 실측 완료(Neo4j 5.19.0, GDS 2.6.6, 합성 데이터 한정), Backend v2 계약 `PROPOSED_FOR_CROSS_REPOSITORY_REVIEW`.
 
 위험 점수는 조사 우선순위이며 부정거래 확률, 동일인 확정, 위반 판정이 아니다. 아래 숫자는 버전이 있는 실험 파라미터이고 출시 기준이 아니다.
 
@@ -76,24 +76,60 @@ python -B -m evaluation.capstone_demo limit-input-v2 --ledger-dir <확정 원장
 | 정리 | `down -v`로 해당 프로젝트의 컨테이너와 익명 볼륨만 제거 |
 | 무결성 | `-ExpectedJarSha256` 필수. 불일치 시 Docker 호출 전에 중단 |
 | 비교 | `-ComparisonLedgerDir <고정 원장> -ComparisonOutputDir <외부 경로>`로 같은 격리 환경에서 score-v1과 score-v2 비교 |
-| 호환성 | **Neo4j 5.20.0 + GDS 2.6.6은 실제로 기동되지 않는다.** 2026-11-08 실행에서 `LinkageError: GDS 2.6.6 is not compatible with Neo4j version: dev`로 Neo4j가 시작 단계에서 종료됐다. [GDS 공식 README](https://github.com/neo4j/graph-data-science/blob/master/README.adoc)의 `2.6.x` 행은 패치 버전 전체의 보장이 아니었고, JAR 내부 호환 모듈은 `4.4`, `5.11`~`5.19`뿐이다. 조합 재결정 전까지 테스트 고정값은 5.20.0으로 남아 있어 GDS를 실행할 수 없다. 운영 `docker-compose.yml`의 5.12.0은 변경하지 않았다 |
+| 호환성 | 테스트 조합은 **Neo4j 5.19.0 + GDS 2.6.6**이다. 실제 기동과 `gds.version()` 2.6.6을 확인했다. 앞서 시도한 Neo4j 5.20.0은 `LinkageError: GDS 2.6.6 is not compatible with Neo4j version: dev`로 시작 단계에서 종료됐다. [GDS 공식 README](https://github.com/neo4j/graph-data-science/blob/master/README.adoc)의 `2.6.x` 행은 패치 버전 전체의 보장이 아니었고, JAR 내부 호환 모듈은 `4.4`, `5.11`~`5.19`뿐이다. 운영 `docker-compose.yml`의 5.12.0은 변경하지 않았다 |
 | JAR 출처 | [GitHub 공식 릴리스 2.6.6](https://github.com/neo4j/graph-data-science/releases/tag/2.6.6)의 `neo4j-graph-data-science-2.6.6.jar` (58,452,898바이트, 2024-05-10 게시) |
 | JAR 체크섬 | GitHub API의 asset `digest`는 `null`이다. **공식 체크섬은 확인되지 않아** SHA-256은 내려받은 파일로 직접 계산해 기록한다. 이는 공식 값과의 대조가 아니라 고정값 기록이다 |
 | JAR 이름 | 기존 `td-issue19-gds-2.6.6.jar`는 공식 이름이 아니어서 공식 이름으로 바꿨다. 이름은 진위를 증명하지 않으며 출처와 크기, SHA-256 기록으로 판단한다 |
-| 내려받은 파일 | JAR 크기 58,452,898바이트(릴리스 표기와 일치), 로컬 계산 SHA-256 `D951B83253B8FA01895ED5466DE8C63B6DD34DD53E818745D0D5C496FB516EFA`. 공식 체크섬과 대조한 값이 아니다. 이미지 `neo4j:5.20.0`은 `sha256:52d3dec8d45585b21edeca8517d752b2512e52aa94f80fc36a5788c88c95f8e4` |
-| 준비 상태 | **미실행.** 위 비호환으로 `gds.version()`과 `gds.louvain.stream`에 도달하지 못했다 |
+| 내려받은 파일 | JAR 크기 58,452,898바이트(릴리스 표기와 일치), 로컬 계산 SHA-256 `D951B83253B8FA01895ED5466DE8C63B6DD34DD53E818745D0D5C496FB516EFA`. 공식 체크섬과 대조한 값이 아니다. 이미지 `neo4j:5.19.0`은 `sha256:e5a03c2b120da495ac6d3198849818d54e6dec6209c79b975b5b5a235b2b86e4` |
+| 준비 상태 | **실행 완료.** 아래 실측 결과 참조 |
 
 실행 절차는 다음과 같다. 다운로드는 승인 뒤에만 수행한다.
 
 ```powershell
-docker pull neo4j:5.20.0
+docker pull neo4j:5.19.0
 curl.exe -L -o <저장소 밖 경로>\neo4j-graph-data-science-2.6.6.jar https://github.com/neo4j/graph-data-science/releases/download/2.6.6/neo4j-graph-data-science-2.6.6.jar
 (Get-Item <JAR>).Length   # 58452898과 일치해야 한다
 (Get-FileHash <JAR> -Algorithm SHA256).Hash
-.\tests\run_gds_integration.ps1 -JarPath <JAR> -ExpectedJarSha256 <계산값> -PythonPath <외부 venv의 python.exe> -ComparisonLedgerDir <v1 원장>,<v2 원장> -ComparisonOutputDir <저장소 밖 경로>
+.\tests\run_gds_integration.ps1 -JarPath <JAR> -ExpectedJarSha256 <계산값> -PythonPath <외부 venv의 python.exe> -ComparisonLedgerDir <v1 원장>,<v2 원장> -ComparisonOutputDir <저장소 밖 경로> -SyntheticOutputDir <저장소 밖 경로>
 ```
 
-실행 전까지 GDS 결과는 `SKIPPED_GDS_ISOLATION`이며 WCC 프록시 값과 섞지 않는다.
+## 격리 GDS 실측 결과 (2026-11-08, NEO4J_GDS_LOUVAIN)
+
+실제 `gds.louvain.stream` 결과이며 아래 WCC 프록시 표와 별개다. 원장 v1은 고정 원장(seed 20261108)이고, v2는 `finalForImport: false`인 시험 생성 원장이다. 통합 테스트 6건은 모두 통과했다.
+
+| 입력 | 점수 | 투영 노드 / 관계 (GDS 실측, 기대값 일치) | 군집 | 단일 계정 군집 | 후보 수 (N3 제외) | CandidatePrecision (N3 제외 / 음성) | 실행 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 원장 v1 | score-v1 | 3,214 / 6,934 | 220 | 214 | 265 | 0.064 / 0.063 | 4,136 |
+| 원장 v1 | score-v2 | 43 / 116 | 5 | 0 | 21 | 0.810 / 0.630 | 862 |
+| 원장 v2 시험 | score-v1 | 3,411 / 6,946 | 243 | 237 | 288 | 0.059 / 0.058 | 1,958 |
+| 원장 v2 시험 | score-v2 | 43 / 116 | 5 | 0 | 21 | 0.810 / 0.630 | 473 |
+
+관계 수는 무방향 투영이라 간선의 2배다. score-v1을 먼저 실행해 JVM 준비 비용이 포함되므로 실행 시간은 두 점수를 공정하게 비교하는 값이 아니다. 모든 실행 뒤 임시 그래프는 0개 남았다.
+
+네 행 모두 Precision@10 1.0, Recall@10 0.588, Precision@17 1.0, Recall@17 1.0, Precision@30 0.567, Recall@30 1.0이다. 이번 원장의 지표는 WCC 프록시와 같다. normalSharedTopRate@30은 score-v1이 0.000, score-v2가 0.118(N1 4계정)이다.
+
+| 패턴 | score-v2 점수 | score-v2 순위 | score-v1 점수 (원장 v1) |
+| --- | --- | --- | --- |
+| R1 | 1.0 | 1~6 | 0.9143 |
+| R2 | 0.6825 | 7~12 | 1.0 |
+| R3 | 0.5524 | 13~17 | 0.9667 |
+| N3 | 0.3429 | 18~23 | 0.85 |
+| N1 | 0.1786 | 24~27 | 0.3125 |
+| N2 | 미탐지(허브 제외) | 없음 | 0.1567 (원장 v2는 0.7556) |
+
+N1이 상위 30에 들어온 것은 후보가 27개뿐이어서이며 모든 R과 N3보다 뒤이고 등급은 LOW다.
+
+### S1~S8 실측에서 확인된 약점
+
+S2, S6, S7, S8의 B3 결과는 두 점수의 후보 커버리지가 같고, S1, S6~S8은 ARI도 1.0으로 같다. 계정 단위 투영은 다음 시나리오에서 관계 복원이 낮아졌다.
+
+| 시나리오 | score-v1 ARI | score-v2 ARI | 후보 커버리지 v1 / v2 |
+| --- | --- | --- | --- |
+| S3 간접 연결 | 1.000 | 0.492 | 0.200 / 0.200 |
+| S4 복합 약한 연결 | 1.000 | 0.705 | 0.333 / 0.333 |
+| S5 결측 신호 체인 | 1.000 | 0.280 | 0.190 / **0.095** |
+
+S5는 실제 Louvain에서 대상 4건 중 2건만 후보로 남았다. 약한 신호로 이어진 희소 체인이 분할될 때 내부 공유 토큰이 없는 커뮤니티가 제거되기 때문으로 보인다. S5의 Average Precision 1.0은 점수 0인 동점을 ID 순으로 정렬한 영향을 받을 수 있어 회수 성능으로 해석하지 않는다. 이 결과를 보고 `score-v2-exp1`의 가중치와 정답은 바꾸지 않았다. 개선은 새 projection 또는 score 버전의 별도 실험으로 다룬다.
 
 ## score-v1 기준선과 비교
 

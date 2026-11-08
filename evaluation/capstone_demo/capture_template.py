@@ -17,12 +17,16 @@ from pydantic_core import PydanticCustomError
 
 from schemas.listing_context import ListingFields
 
-from .ledger import MANIFEST_FILE, require_outside_repository
+from .ledger import MANIFEST_FILE, require_outside_repository, verify
 
 
 CAPTURE_IDS = ("CAPTURE-A", "CAPTURE-B", "CAPTURE-C", "CAPTURE-D")
 FUNCTION_TEST_SELECTION = "USER_SELECTED_SEAT_FROM_FROZEN_LEDGER_FUNCTION_TEST"
 NO_INPUT_CHANGE = "NO_INPUT_CHANGE_AFTER_POST_AUTHORED"
+EXPECTED_SELECTION_KINDS = {
+    capture_id: FUNCTION_TEST_SELECTION if capture_id == "CAPTURE-A" else NO_INPUT_CHANGE
+    for capture_id in CAPTURE_IDS
+}
 TEMPLATE_FILE = "capture_evaluation_template.json"
 
 _Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
@@ -106,6 +110,9 @@ class CaptureRecord(_Strict):
 
     @model_validator(mode="after")
     def check_status(self):
+        # 수동 편집으로 기능 시험과 무수정 확인의 구분이 바뀌지 않도록 고정합니다.
+        if self.seatSelectionKind != EXPECTED_SELECTION_KINDS[self.captureId]:
+            raise PydanticCustomError("invalid_selection_kind", "Selection kind is fixed for each capture")
         captured = (self.imageSha256, self.capturedAt, self.humanObservation)
         if self.status == "PENDING_CAPTURE":
             if any(value is not None for value in (*captured, self.modelEvaluation, self.ledgerComparison)):
@@ -156,7 +163,7 @@ def build_template(manifest_bytes: bytes) -> dict[str, object]:
         "records": [
             {
                 "captureId": capture_id,
-                "seatSelectionKind": FUNCTION_TEST_SELECTION if capture_id == "CAPTURE-A" else NO_INPUT_CHANGE,
+                "seatSelectionKind": EXPECTED_SELECTION_KINDS[capture_id],
                 "status": "PENDING_CAPTURE",
                 "imageSha256": None,
                 "capturedAt": None,
@@ -176,8 +183,14 @@ def validate_evaluation(document: dict[str, object]) -> CaptureEvaluation:
     return CaptureEvaluation.model_validate_json(json.dumps(document, ensure_ascii=False))
 
 
-def write_template(ledger_dir: Path, output_dir: Path) -> Path:
+def write_template(ledger_dir: Path, output_dir: Path, require_committed_generator: bool = True) -> Path:
+    """verify가 PASS인 원장에만 평가 템플릿을 연결합니다."""
+
     target = require_outside_repository(output_dir)
+    result = verify(ledger_dir, require_committed_generator=require_committed_generator)
+    if result["status"] != "PASS":
+        failed = ", ".join(name for name, passed in result["checks"].items() if not passed)
+        raise ValueError(f"Ledger verification failed: {failed}")
     template = build_template((ledger_dir / MANIFEST_FILE).read_bytes())
     target.mkdir(parents=True, exist_ok=True)
     path = target / TEMPLATE_FILE

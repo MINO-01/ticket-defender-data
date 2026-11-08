@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import random
 import subprocess
+import unicodedata
 import uuid
 
 from evaluation.track1.tokens import hmac_token
@@ -323,12 +324,36 @@ def default_performance_id(seed: int) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ticket-defender:capstone-demo:performance:{seed}"))
 
 
+def normalize_performance_id(value: str) -> str:
+    """하이픈이 있는 UUID만 받아 소문자 표준형으로 돌려줍니다."""
+
+    try:
+        parsed = str(uuid.UUID(value))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("performance_id must be a canonical UUID") from None
+    if parsed != value.lower():
+        raise ValueError("performance_id must be a canonical UUID")
+    return parsed
+
+
+def validate_event_ref(value: str) -> str:
+    """Spring eventId의 @NotBlank, @Size(max = 128) 범위에 공백과 제어문자 금지를 더합니다."""
+
+    # Java 문자열 길이와 맞추기 위해 UTF-16 코드 단위로 계산합니다.
+    if not isinstance(value, str) or not value or len(value.encode("utf-16-le", "surrogatepass")) / 2 > 128:
+        raise ValueError("event_ref must be 1 to 128 characters")
+    if any(unicodedata.category(character)[0] in "CZ" for character in value):
+        raise ValueError("event_ref must not contain whitespace or control characters")
+    return value
+
+
 def build_dataset(
     seed: int = DEFAULT_SEED, performance_id: str | None = None, event_ref: str = DEFAULT_EVENT_REF
 ) -> Dataset:
     """seed와 공연 참조만으로 출력 바이트를 결정적으로 만듭니다."""
 
-    performance_id = performance_id or default_performance_id(seed)
+    performance_id = default_performance_id(seed) if performance_id is None else normalize_performance_id(performance_id)
+    event_ref = validate_event_ref(event_ref)
     source_version = source_version_for(seed)
     rng = random.Random(seed)
     patterns = _pattern_definitions()
@@ -450,8 +475,12 @@ def generate(
     return target / MANIFEST_FILE
 
 
-def verify(output_dir: Path) -> dict[str, object]:
-    """저장 파일이 manifest와 일치하고 같은 입력으로 다시 재현되는지 검사합니다."""
+def verify(output_dir: Path, require_committed_generator: bool = True) -> dict[str, object]:
+    """저장 파일이 manifest와 일치하고 같은 입력으로 다시 재현되는지 검사합니다.
+
+    require_committed_generator=False는 미커밋 생성기로 만든 테스트 원장에만 씁니다.
+    이때도 generatorWasCommitted 결과는 숨기지 않고 판정에서만 제외합니다.
+    """
 
     manifest_bytes = (output_dir / MANIFEST_FILE).read_bytes()
     manifest = json.loads(manifest_bytes)
@@ -471,8 +500,12 @@ def verify(output_dir: Path) -> dict[str, object]:
         "generatorCodeUnchanged": manifest["generator"]["codeSha256"] == generator_code_sha256(),
         "generatorWasCommitted": manifest["generator"]["generatorCommitted"] is True,
     }
+    required = {
+        name: passed for name, passed in checks.items()
+        if require_committed_generator or name != "generatorWasCommitted"
+    }
     return {
-        "status": "PASS" if all(checks.values()) else "FAIL",
+        "status": "PASS" if all(required.values()) else "FAIL",
         "manifestSha256": sha256(manifest_bytes).hexdigest(),
         "sourceVersion": manifest["sourceVersion"],
         "checks": checks,

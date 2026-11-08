@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Iterable
 
 from .baselines import b0_random, b1_shared_signal_rule, b2_wcc
-from .gds import b3_existing_gds_louvain
+from .gds import b3_existing_gds_louvain, b3_legacy_v1_gds_louvain
 from .ieee import default_ieee_data_dir, holdout_test_dataset, load_ieee_cis
 from .metrics import evaluate
 from .models import BaselineOutput, EvaluationDataset
@@ -33,6 +33,9 @@ def _run_outputs(
         yield factory(dataset.records), round((perf_counter() - started) * 1000), None
     started = perf_counter()
     yield b3_existing_gds_louvain(dataset.records, uri=gds_uri, password=gds_password), round((perf_counter() - started) * 1000), None
+    # 계정 단위 전환 뒤에도 같은 입력의 티켓 단위 기준선을 별도 행으로 남깁니다.
+    started = perf_counter()
+    yield b3_legacy_v1_gds_louvain(dataset.records, uri=gds_uri, password=gds_password), round((perf_counter() - started) * 1000), None
 
 
 def evaluate_datasets(

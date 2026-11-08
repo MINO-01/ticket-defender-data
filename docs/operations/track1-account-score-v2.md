@@ -38,12 +38,48 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 - 여러 계정의 합계는 계산하지 않는다. 동일인 합산 규칙은 승인된 정책이 없어 구현하지 않았다.
 - 내부 NOT_EVALUATED 상태는 계약에서 `POLICY_NOT_CONFIRMED`, `QUANTITY_DATA_INCOMPLETE`, `POLICY_TIME_NOT_APPLICABLE`로 표현한다. 어떤 경우에도 기본 한도를 쓰지 않는다.
 
-### 계약 확인이 필요한 항목
+- `EVALUATED`는 정책 확인, `COMPLETE`, `NETTED`, `DEDUPLICATED`, 정책 기간 충족에 더해 `quantitySourceVersion`과 `quantityAsOf`가 모두 있을 때만 나온다. 계약은 두 필드를 nullable로 두지만, 출처를 알 수 없는 수량으로 한도를 판정하지 않도록 없으면 `QUANTITY_DATA_INCOMPLETE`로 돌려준다.
+
+### 계약 확인이 필요한 항목 (Backend `15803c1` 재확인, YAML은 `d71e11f`에서 변경 없음)
 
 - 예시의 `projection-v2;score-v2`와 구현의 `projection-v2-account;score-v2-exp1`이 다르다. 계약은 예시로 표기하며 Spring이 값을 비교하지 않는 전제다.
-- `effectiveUntil`의 경계가 명시되어 있지 않아 시작 포함, 종료 제외로 구현했다.
+- `effectiveUntil`의 경계가 계약과 Backend 코드에 명시되어 있지 않다. 잠정적으로 시작 포함, 종료 제외로 두어 정확히 종료 시각인 구매는 판정하지 않는다(`POLICY_TIME_NOT_APPLICABLE`). Backend 정책 저장값은 시간대 없는 `LocalDateTime`이고 계약은 시간대 있는 `date-time`이므로 변환 기준도 합의가 필요하다.
+- `quantitySourceVersion`, `quantityAsOf`의 필수 여부, `purchasedAt`이 `quantityAsOf`보다 늦은 경우의 처리가 계약에 없다.
+- Spring 쪽 `MacroAnalysisRequest`와 `FastApiAdapter`는 v2 필드를 아직 보내지 않는다.
 - 정책과 범위 외의 스키마 오류 코드가 `ContractError`에 없어 기존 `{"detail": [{"code": ...}]}` 형식을 유지했다.
 - 같은 `eventId` 안에서 `(accountId, reservationNo, eventId)`는 응답 `members` 식별자이므로 요청 전체에서 중복을 거부한다.
+
+## 시연용 v2 분석 입력
+
+`track1_ingest.json`은 v1 형식이며 v2에 필요한 값의 출처는 다음과 같다.
+
+| v2 필드 | 운영 입력의 출처 | 시연 합성 입력의 출처 |
+| --- | --- | --- |
+| `internalEventId`, `performanceId` | Spring이 인증된 범위에서 해석 (미구현) | 호출자가 지정한 격리 DB 값, 원장 manifest의 performanceId |
+| `policy`, `policyVerificationStatus` | Spring의 ACTIVE 정책 (`purchase_limit_policies`) | 격리 Spring에 실제 등록한 값을 호출자가 전달. 없으면 `POLICY_NOT_CONFIRMED` |
+| `purchasedAt` | 예매처 원천 데이터 (미구현) | **원장에 없음.** 호출자가 명시한 단일 합성 시각이며 `fromLedger: false`로 기록 |
+| `effectiveTicketQuantity` | 취소를 반영한 예매처 수량 (미구현) | 1행 1매 합성 전제에 따른 1 |
+| `quantitySourceVersion`, `quantityAsOf` | Spring의 수량 스냅샷 (미구현) | 원장 sourceVersion, 호출자가 명시한 합성 시각 |
+
+```powershell
+python -B -m evaluation.capstone_demo limit-input-v2 --ledger-dir <확정 원장 v2> --output-dir <새 디렉터리> --internal-event-id <UUID> --synthetic-purchased-at <시각> --quantity-as-of <시각> --policy-max 2 --policy-version <등록 버전> --policy-effective-from <시각>
+```
+
+원장 `verify-v2`가 PASS이고 `finalForImport: true`일 때만 생성한다. 산출물은 `track1_limit_input_v2.json`과 입력 SHA-256, 원장 SHA-256, 합성 전제를 담은 manifest이며 원장 디렉터리 밖의 빈 디렉터리에만 쓴다. 정답 파일은 읽지 않는다.
+
+## 격리 GDS 실행 준비
+
+| 조건 | 상태 |
+| --- | --- |
+| 외부 venv | `tests/run_gds_integration.ps1 -PythonPath <venv의 python.exe>`로 사용 가능 |
+| 격리 | 실행마다 무작위 `tdissue19gds*` Compose 프로젝트, 127.0.0.1 동적 포트, JAR 읽기 전용 바인드. `--pull never` |
+| 정리 | `down -v`로 해당 프로젝트의 컨테이너와 익명 볼륨만 제거 |
+| 무결성 | `-ExpectedJarSha256` 필수. 불일치 시 Docker 호출 전에 중단 |
+| 비교 | `-ComparisonLedgerDir <고정 원장> -ComparisonOutputDir <외부 경로>`로 같은 격리 환경에서 score-v1과 score-v2 비교 |
+| 호환성 | **미해결.** GDS 공식 README의 2.6.x 5.x 호환 범위는 Neo4j 5.14.0~5.20.0이며 현재 고정값 Neo4j 5.12.0은 어느 GDS 행에도 없다 |
+| JAR | **없음.** 공식 체크섬도 확인하지 못했다 |
+
+JAR 준비와 버전 조합이 결정되기 전까지 GDS 결과는 `SKIPPED_GDS_ISOLATION`이다.
 
 ## score-v1 기준선과 비교
 
@@ -55,7 +91,36 @@ python -B -m evaluation.capstone_demo compare --ledger-dir <원장> --output-dir
 
 N3(`POLICY_AMBIGUOUS_REVIEW`)는 기본 이진 지표에서 제외하지만 N3를 음성으로 처리한 지표와 탐지 수, 점수, 순위 표를 항상 함께 출력한다.
 
-### 2026-11-08 결과 (OFFLINE_WCC_PROXY_NOT_LOUVAIN)
+### 지표 정의 (`capstone-compare-metrics-v2-fixed-k`)
+
+| 지표 | 정의 |
+| --- | --- |
+| `precisionAtK` | 같은 모집단의 상위 k개 중 점수가 양수인 R 계정 수 / k. 모집단이 k보다 작으면 `null` |
+| `recallAtK` | 상위 k개의 R 적중 수 / 전체 R 계정 수 |
+| `candidatePrecision` | 점수가 양수인 전체 후보 중 R 계정 비율. 모델별 후보 수에 의존하므로 k 지표와 분리 |
+| `selectedCount` | k 안 또는 전체의 실제 조사 후보 수 |
+| `normalSharedTopRate` | 상위 k에 포함된 N1, N2 계정 수 / 전체 N1, N2 계정 수 (34) |
+| `normalSharedShareOfSelected` | 수정 전 `normalSharedTopRate` 정의 (N1, N2 수 / 실제 선택 수) |
+| `positiveOnlyPrecisionAtK` | 수정 전 `precisionAtK` 정의 (적중 수 / 실제 선택 수). 후보 수가 다르면 비교 불가 |
+
+N3는 제외한 값(`binaryExcludingN3`)과 음성으로 취급한 값(`binaryN3AsNegative`)을 모두 낸다. 점수가 0인 계정은 k 안에 들어와도 적중으로 세지 않는다.
+
+### 수정 후 결과 (OFFLINE_WCC_PROXY_NOT_LOUVAIN, 고정 k)
+
+같은 원장과 정답으로 다시 평가했다. 재평가에서 Louvain 행은 여전히 `SKIPPED_GDS_ISOLATION`이다.
+
+| 입력 | 점수 | Precision@30 (N3 제외) | Precision@30 (N3 음성) | Recall@30 | 후보 수 (N3 제외) | CandidatePrecision (N3 제외) | CandidatePrecision (N3 음성) | normalSharedTopRate@30 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 원장 v1 | score-v1 | 0.567 | 0.567 | 1.00 | 265 | 0.064 | 0.063 | 0.000 |
+| 원장 v1 | score-v2 | 0.567 | 0.567 | 1.00 | 21 | 0.810 | 0.630 | 0.118 |
+| 원장 v2 시험 생성 | score-v1 | 0.567 | 0.567 | 1.00 | 288 | 0.059 | 0.058 | 0.000 |
+| 원장 v2 시험 생성 | score-v2 | 0.567 | 0.567 | 1.00 | 21 | 0.810 | 0.630 | 0.118 |
+
+k=10과 k=17의 Precision과 Recall은 네 행 모두 같다(P@10 1.0, R@10 0.588, P@17 1.0, R@17 1.0). 고정 k에서는 **score-v2의 Precision@30 우위가 없다.** 수정 전 표의 0.810은 분모가 21인 값이었다. score-v2의 개선은 후보 수 축소와 단일 계정 군집 제거에서 나타난다. score-v1은 N1을 상위 30 밖에 두어 0.000이지만, 이는 단일 계정 군집이 앞자리를 차지한 결과이고 score-v2는 N1 4계정이 후보 하위로 포함된다.
+
+### 수정 전 결과 (구 정의 보존, OFFLINE_WCC_PROXY_NOT_LOUVAIN)
+
+아래 표의 P@30은 `positiveOnlyPrecisionAtK`에 해당하며 후보 수가 다른 점수끼리 비교할 수 없다.
 
 Docker 데몬과 GDS JAR이 없어 Louvain 행은 `SKIPPED_GDS_ISOLATION`이다. 아래 표는 연결요소로 파티션을 대신해 투영과 점수만 비교한 값이며 **Louvain 실측 성능이 아니다.** 주입 패턴이 구조적으로 뚜렷한 합성 데이터이므로 일반화 성능으로 해석하지 않는다. 같은 점수의 순서는 계정 ID로 정한다.
 

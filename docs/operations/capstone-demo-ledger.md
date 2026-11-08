@@ -14,7 +14,10 @@
 `verify`는 파일 SHA-256, 행 수, sourceVersion, seed 재현 바이트, 생성기 코드 SHA를 다시 확인한다. 고정 뒤에는 좌석, 정답, 입력 토큰을 게시물 결과에 맞춰 바꾸지 않는다.
 
 - `--performance-id`는 A3 격리 DB의 ACTIVE 공연 UUID가 정해졌을 때 쓴다. 기본값은 seed에서 유도한 UUID이며 실제 DB 등록을 뜻하지 않는다. 값을 바꿔도 `rowsSha256`과 입력 토큰은 그대로이지만 `a3_fixture.properties`의 SHA-256은 달라진다. 게시물 작성 전에 한 번만 정한다.
-- `--event-ref`는 Spring 수집 범위에서 조회되는 공연 외부 참조와 같아야 한다.
+- `--performance-id`는 하이픈이 있는 UUID만 받아 소문자 표준형으로 저장한다.
+- `--event-ref`는 Spring 수집 범위에서 조회되는 공연 외부 참조와 같아야 한다. 1~128자이며 공백과 제어문자는 거부한다.
+- `capture-template`은 `verify`가 PASS인 원장에만 템플릿을 연결한다.
+- `generatorCodeUnchanged`는 원장을 만든 코드와 현재 코드의 일치 여부를 본다. 생성기 파일이 바뀌면 출력 바이트가 같아도 이전 원장은 이 항목에서 FAIL이 된다. 이전 원장을 수정하거나 manifest를 고쳐 맞추지 말고, 최종 공연 UUID가 정해지면 현재 커밋에서 새 디렉터리에 고정한다.
 
 ## 계약과 분석 경계
 

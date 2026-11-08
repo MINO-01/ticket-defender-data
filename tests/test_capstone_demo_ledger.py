@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -158,6 +159,41 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(other.rows_sha256, self.dataset.rows_sha256)
         self.assertEqual(other.files[ledger.TRACK1_FILE], self.dataset.files[ledger.TRACK1_FILE])
 
+    def test_default_output_still_matches_the_frozen_ledger_hashes(self):
+        self.assertEqual(self.dataset.rows_sha256, "bcd33b2580cc04404d9a126ad5308e54d792ba1b7361b54c21957e7d5da62fe5")
+        self.assertEqual(sha256(self.dataset.files[ledger.A3_FILE]).hexdigest(),
+                         "185dfc3f8c24eef3b61b5d39c3262f6b141029d70666a78f26793bb072053e55")
+        self.assertEqual(sha256(self.dataset.files[ledger.TRACK1_FILE]).hexdigest(),
+                         "2e58f4152f25fa7b6fb8d3b28c83c0b7d44d27a9e42a8db5da7a7071e9e25a57")
+
+    def test_invalid_performance_id_is_rejected_before_any_file(self):
+        valid = "44444444-4444-4444-8444-444444444444"
+        for value in ("not-a-uuid", "", valid.replace("-", ""), f"{valid}\nrow-count=1", f" {valid}", f"{{{valid}}}"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "ledger"
+                with self.assertRaises(ValueError):
+                    ledger.generate(output, performance_id=value, require_committed_generator=False)
+                self.assertFalse(output.exists())
+
+    def test_performance_id_is_normalized_to_lowercase(self):
+        upper = ledger.build_dataset(performance_id="ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF")
+        self.assertEqual(upper.performance_id, "abcdefab-cdef-4abc-8def-abcdefabcdef")
+        self.assertIn(b"performance-id=abcdefab-cdef-4abc-8def-abcdefabcdef\n", upper.files[ledger.A3_FILE])
+
+    def test_invalid_event_ref_is_rejected_before_any_file(self):
+        for value in ("", "   ", "event ref", " event", "event\n", "event\tref", "event\x00", "event ref",
+                      "event​ref", "x" * 129, "\U0001f3ab" * 65):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "ledger"
+                with self.assertRaises(ValueError):
+                    ledger.generate(output, event_ref=value, require_committed_generator=False)
+                self.assertFalse(output.exists())
+
+    def test_event_ref_at_the_contract_limit_is_accepted(self):
+        event_ref = "x" * 128
+        tickets = json.loads(ledger.build_dataset(event_ref=event_ref).files[ledger.TRACK1_FILE])["tickets"]
+        self.assertEqual({ticket["eventId"] for ticket in tickets}, {event_ref})
+
 
 class CaptureTemplateTests(unittest.TestCase):
     def setUp(self):
@@ -220,8 +256,43 @@ class CaptureTemplateTests(unittest.TestCase):
             ledger.generate(source, require_committed_generator=False)
             with self.assertRaises(ValueError):
                 capture_template.write_template(source, REPO / "build" / "capture")
-            path = capture_template.write_template(source, Path(temporary) / "capture")
+            path = capture_template.write_template(
+                source, Path(temporary) / "capture", require_committed_generator=False
+            )
             capture_template.validate_evaluation(json.loads(path.read_bytes()))
+
+    def test_selection_kind_cannot_be_changed_by_manual_edit(self):
+        for index, kind in ((0, capture_template.NO_INPUT_CHANGE), (1, capture_template.FUNCTION_TEST_SELECTION),
+                            (3, capture_template.FUNCTION_TEST_SELECTION)):
+            with self.subTest(index=index):
+                edited = json.loads(json.dumps(self.template))
+                edited["records"][index]["seatSelectionKind"] = kind
+                with self.assertRaises(ValidationError):
+                    capture_template.validate_evaluation(edited)
+
+    def test_tampered_ledger_cannot_receive_a_template(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "ledger"
+            capture = Path(temporary) / "capture"
+            ledger.generate(source, require_committed_generator=False)
+            target = source / ledger.A3_FILE
+            target.write_bytes(target.read_bytes().replace(b".zone=19", b".zone=20", 1))
+            with self.assertRaisesRegex(ValueError, "fileHashesMatchManifest"):
+                capture_template.write_template(source, capture, require_committed_generator=False)
+            self.assertFalse(capture.exists())
+
+    def test_uncommitted_generator_ledger_needs_the_explicit_test_option(self):
+        state = {"gitHeadSha": None, "generatorCommitted": False}
+        with patch.object(ledger, "generator_git_state", return_value=state), tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "ledger"
+            capture = Path(temporary) / "capture"
+            ledger.generate(source, require_committed_generator=False)
+            with self.assertRaisesRegex(ValueError, "generatorWasCommitted"):
+                capture_template.write_template(source, capture)
+            self.assertFalse(capture.exists())
+            relaxed = ledger.verify(source, require_committed_generator=False)
+            self.assertEqual(relaxed["status"], "PASS")
+            self.assertFalse(relaxed["checks"]["generatorWasCommitted"])
 
 
 if __name__ == "__main__":

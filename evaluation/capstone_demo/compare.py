@@ -30,6 +30,7 @@ POSITIVE_PATTERNS = ("R1", "R2", "R3")
 NORMAL_SHARED_PATTERNS = ("N1", "N2")
 AMBIGUOUS_PATTERN = "N3"
 K_VALUES = (10, 17, 30)
+METRIC_DEFINITION_VERSION = "capstone-compare-metrics-v2-fixed-k"
 
 
 def _components(edges: Sequence[Mapping[str, int]]) -> dict[int, int]:
@@ -98,18 +99,38 @@ def account_ranking(
 
 
 def _at_k(
-    ranking: Sequence[str], scores: Mapping[str, float], patterns: Mapping[str, str], k: int, positives: int
+    ranking: Sequence[str], scores: Mapping[str, float], patterns: Mapping[str, str],
+    k: int, positives: int, normal_total: int,
 ) -> dict[str, object]:
+    """같은 모집단의 상위 k개를 고정 분모로 평가합니다.
+
+    점수가 0인 계정은 후보가 아니므로 상위 k에 들어와도 적중으로 세지 않습니다.
+    positiveOnlyPrecisionAtK는 수정 전 정의이며 후보 수가 다르면 서로 비교할 수 없습니다.
+    """
+
     selected = [account for account in ranking[:k] if scores[account] > 0]
     hits = sum(1 for account in selected if patterns.get(account) in POSITIVE_PATTERNS)
     normal = sum(1 for account in selected if patterns.get(account) in NORMAL_SHARED_PATTERNS)
     return {
         "k": k,
-        "selected": len(selected),
-        "precisionAtK": hits / len(selected) if selected else None,
+        "selectedCount": len(selected),
+        "precisionAtK": hits / k if len(ranking) >= k else None,
         "recallAtK": hits / positives if positives else None,
+        "positiveOnlyPrecisionAtK": hits / len(selected) if selected else None,
         "normalSharedInTop": normal,
-        "normalSharedTopRate": normal / len(selected) if selected else None,
+        "normalSharedTopRate": normal / normal_total if normal_total else None,
+        "normalSharedShareOfSelected": normal / len(selected) if selected else None,
+    }
+
+
+def _candidate_summary(
+    ranking: Sequence[str], scores: Mapping[str, float], patterns: Mapping[str, str]
+) -> dict[str, object]:
+    candidates = [account for account in ranking if scores[account] > 0]
+    hits = sum(1 for account in candidates if patterns.get(account) in POSITIVE_PATTERNS)
+    return {
+        "selectedCount": len(candidates),
+        "candidatePrecision": hits / len(candidates) if candidates else None,
     }
 
 
@@ -122,6 +143,7 @@ def evaluate_clusters(
     ranking, scores = account_ranking(request, clusters)
     positions = {account: position for position, account in enumerate(ranking, start=1)}
     positives = sum(1 for pattern in patterns.values() if pattern in POSITIVE_PATTERNS)
+    normal_total = sum(1 for pattern in patterns.values() if pattern in NORMAL_SHARED_PATTERNS)
     without_n3 = [account for account in ranking if patterns.get(account) != AMBIGUOUS_PATTERN]
 
     by_pattern = defaultdict(list)
@@ -146,8 +168,12 @@ def evaluate_clusters(
         "clusterCount": len(clusters),
         "singleAccountClusterCount": multi_ticket_only,
         "independentAccountsFlagged": independent_flagged,
-        "binaryExcludingN3": [_at_k(without_n3, scores, patterns, k, positives) for k in K_VALUES],
-        "binaryN3AsNegative": [_at_k(ranking, scores, patterns, k, positives) for k in K_VALUES],
+        "binaryExcludingN3": [_at_k(without_n3, scores, patterns, k, positives, normal_total) for k in K_VALUES],
+        "binaryN3AsNegative": [_at_k(ranking, scores, patterns, k, positives, normal_total) for k in K_VALUES],
+        "candidateSummary": {
+            "excludingN3": _candidate_summary(without_n3, scores, patterns),
+            "n3AsNegative": _candidate_summary(ranking, scores, patterns),
+        },
         "patternTable": pattern_table,
     }
 
@@ -205,6 +231,7 @@ def _gds_rows(request, answer, uri: str | None, password: str | None) -> list[di
 def compare_ledger(input_dir: Path, *, gds_uri: str | None = None, gds_password: str | None = None) -> dict[str, object]:
     request, answer, digest = load_request(input_dir)
     return {
+        "metricDefinitionVersion": METRIC_DEFINITION_VERSION,
         "track1InputSha256": digest,
         "ticketCount": len(request.tickets),
         "accountCount": len({ticket.account_id for ticket in request.tickets}),

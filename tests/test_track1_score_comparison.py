@@ -1,5 +1,6 @@
 """score-v1 보존, 합성 원장 v2, 공정 비교의 회귀 테스트입니다."""
 
+from hashlib import sha256
 import json
 from pathlib import Path
 import tempfile
@@ -165,6 +166,13 @@ class ComparisonTests(unittest.TestCase):
     def row(self, version):
         return next(r for r in self.result["rows"] if r["engine"] == PROXY_ENGINE and r["scoreVersion"] == version)
 
+    def test_comparison_is_reproducible_apart_from_runtime(self):
+        def stable(result):
+            return [{k: v for k, v in row.items() if k != "runtimeMs"} for row in result["rows"]]
+
+        self.assertEqual(stable(compare_ledger(self.directory)), stable(self.result))
+        self.assertEqual(self.result["metricDefinitionVersion"], "capstone-compare-metrics-v2-fixed-k")
+
     def test_gds_rows_are_skipped_without_isolation(self):
         gds = [r for r in self.result["rows"] if r["engine"] != PROXY_ENGINE]
         self.assertEqual([r["status"] for r in gds], ["SKIPPED_GDS_ISOLATION"] * 2)
@@ -201,7 +209,86 @@ class ComparisonTests(unittest.TestCase):
         )
         result = evaluate_clusters(request, answer, [cluster])
         self.assertEqual(result["patternTable"]["R1"]["bestRank"], 1)
-        self.assertEqual(result["binaryExcludingN3"][0]["precisionAtK"], 1.0)
+        # 모집단이 k보다 작으면 고정 k 정밀도는 정의되지 않습니다.
+        self.assertIsNone(result["binaryExcludingN3"][0]["precisionAtK"])
+        self.assertEqual(result["binaryExcludingN3"][0]["positiveOnlyPrecisionAtK"], 1.0)
+
+
+class FixedKMetricTests(unittest.TestCase):
+    """후보 수와 무관하게 Precision@k 분모가 k로 고정되는지 확인합니다."""
+
+    def setUp(self):
+        tickets = [t(f"a{i:02d}", f"r{i}", paymentHash=f"{i:x}"[-1]) for i in range(40)]
+        self.request = req(tickets)
+        self.answer = {"patterns": [
+            {"patternId": "R1", "members": [{"accountId": f"a{i:02d}"} for i in range(4)]},
+            {"patternId": "N1", "members": [{"accountId": f"a{i:02d}"} for i in range(4, 6)]},
+            {"patternId": "N2", "members": [{"accountId": f"a{i:02d}"} for i in range(6, 8)]},
+            {"patternId": "N3", "members": [{"accountId": f"a{i:02d}"} for i in range(8, 10)]},
+        ]}
+
+    def clusters(self, accounts):
+        return [Track1Cluster(
+            clusterId="c", paymentHashes=["a" * 64], addressHashes=[], deviceIdHashes=[], ipHashes=[], riskScore=0.5,
+            members=[Track1ClusterMember(accountId=f"a{i:02d}", reservationNo=f"r{i}", eventId="e1") for i in accounts],
+        )]
+
+    def at(self, result, mode, k):
+        return next(row for row in result[mode] if row["k"] == k)
+
+    def test_precision_denominator_is_k_when_candidates_are_fewer(self):
+        result = evaluate_clusters(self.request, self.answer, self.clusters(range(6)))
+        row = self.at(result, "binaryExcludingN3", 30)
+        self.assertEqual(row["selectedCount"], 6)
+        self.assertAlmostEqual(row["precisionAtK"], 4 / 30)
+        self.assertAlmostEqual(row["positiveOnlyPrecisionAtK"], 4 / 6)
+        self.assertEqual(row["recallAtK"], 1.0)
+
+    def test_fewer_candidates_do_not_inflate_precision(self):
+        narrow = evaluate_clusters(self.request, self.answer, self.clusters(range(4)))
+        wide = evaluate_clusters(self.request, self.answer, self.clusters(list(range(4)) + list(range(10, 36))))
+        self.assertEqual(
+            self.at(narrow, "binaryExcludingN3", 30)["precisionAtK"],
+            self.at(wide, "binaryExcludingN3", 30)["precisionAtK"],
+        )
+        self.assertGreater(
+            narrow["candidateSummary"]["excludingN3"]["candidatePrecision"],
+            wide["candidateSummary"]["excludingN3"]["candidatePrecision"],
+        )
+
+    def test_zero_score_positive_is_not_a_hit(self):
+        result = evaluate_clusters(self.request, self.answer, self.clusters([10, 11]))
+        row = self.at(result, "binaryExcludingN3", 10)
+        self.assertEqual(row["precisionAtK"], 0.0)
+        self.assertEqual(row["recallAtK"], 0.0)
+
+    def test_n3_modes_differ_only_by_n3_treatment(self):
+        result = evaluate_clusters(self.request, self.answer, self.clusters(list(range(4)) + [8, 9]))
+        self.assertEqual(result["candidateSummary"]["excludingN3"], {"selectedCount": 4, "candidatePrecision": 1.0})
+        self.assertEqual(result["candidateSummary"]["n3AsNegative"], {"selectedCount": 6, "candidatePrecision": 4 / 6})
+        self.assertEqual(result["patternTable"]["N3"]["detectedAccounts"], 2)
+
+    def test_normal_shared_rate_uses_all_normal_shared_accounts(self):
+        result = evaluate_clusters(self.request, self.answer, self.clusters(range(5)))
+        row = self.at(result, "binaryExcludingN3", 10)
+        self.assertEqual(row["normalSharedInTop"], 1)
+        self.assertEqual(row["normalSharedTopRate"], 1 / 4)
+        self.assertEqual(row["normalSharedShareOfSelected"], 1 / 5)
+
+
+class FrozenLedgerV1HashTests(unittest.TestCase):
+    """고정 v1 원장의 SHA-256을 현재 생성기 재현 결과와 대조합니다."""
+
+    def test_v1_bytes_match_frozen_hashes(self):
+        dataset = ledger.build_dataset(performance_id="6f53287f-6f6f-564d-8880-bdb728f7f845")
+        expected = {
+            ledger.A3_FILE: "185dfc3f8c24eef3b61b5d39c3262f6b141029d70666a78f26793bb072053e55",
+            ledger.ANSWER_FILE: "a2280cfee3c8975e675707c5df28e709ede454fc0b79f79abb41f6b3b57f90a4",
+            ledger.SEATS_FILE: "487499e70a1abe3fb4d350df4fa7cd46970d939ef8d8ce807efab57e1aeaa455",
+            ledger.README_FILE: "e236e7ebed2b096dbc3f72b49052f49dba72ce83162c6a356430881220ccb9f2",
+            ledger.TRACK1_FILE: "2e58f4152f25fa7b6fb8d3b28c83c0b7d44d27a9e42a8db5da7a7071e9e25a57",
+        }
+        self.assertEqual({name: sha256(dataset.files[name]).hexdigest() for name in expected}, expected)
 
 
 if __name__ == "__main__":

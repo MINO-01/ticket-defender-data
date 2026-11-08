@@ -38,6 +38,18 @@ def _parser() -> argparse.ArgumentParser:
     check_v2 = commands.add_parser("verify-v2", help="합성 원장 v2를 검증합니다")
     check_v2.add_argument("--ledger-dir", type=Path, required=True)
     check_v2.add_argument("--allow-uncommitted-generator", action="store_true", help="테스트 전용입니다")
+    limit_input = commands.add_parser("limit-input-v2", help="검증된 원장 v2에서 한도 분석 시연 입력을 별도 생성합니다")
+    limit_input.add_argument("--ledger-dir", type=Path, required=True)
+    limit_input.add_argument("--output-dir", type=Path, required=True)
+    limit_input.add_argument("--internal-event-id", required=True, help="격리 Spring의 events.id")
+    limit_input.add_argument("--synthetic-purchased-at", required=True, help="원장에 없는 합성 구매 시각 전제")
+    limit_input.add_argument("--quantity-as-of", required=True, help="합성 수량 기준 시각")
+    limit_input.add_argument("--policy-max", type=int, help="격리 Spring에 등록된 계정별 한도")
+    limit_input.add_argument("--policy-version")
+    limit_input.add_argument("--policy-effective-from")
+    limit_input.add_argument("--policy-effective-until")
+    limit_input.add_argument("--allow-unconfirmed-ledger", action="store_true", help="최종 사용 불가 시험용입니다")
+    limit_input.add_argument("--allow-uncommitted-generator", action="store_true", help="테스트 전용입니다")
     compare_scores = commands.add_parser("compare", help="같은 입력으로 score-v1과 score-v2를 비교합니다")
     compare_scores.add_argument("--ledger-dir", type=Path, required=True)
     compare_scores.add_argument("--output-dir", type=Path, required=True)
@@ -60,6 +72,23 @@ def main(argv: list[str] | None = None) -> int:
         result = ledger_v2.verify(args.ledger_dir, not args.allow_uncommitted_generator)
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "PASS" else 1
+    if args.command == "limit-input-v2":
+        from .limit_input_v2 import RegisteredPolicy, write_limit_input
+
+        policy_values = (args.policy_max, args.policy_version, args.policy_effective_from)
+        if any(value is not None for value in policy_values) and not all(value is not None for value in policy_values):
+            raise SystemExit("--policy-max, --policy-version, --policy-effective-from must be given together")
+        policy = None if args.policy_max is None else RegisteredPolicy(
+            args.policy_max, args.policy_version, args.policy_effective_from, args.policy_effective_until,
+        )
+        manifest = write_limit_input(
+            args.ledger_dir, args.output_dir, internal_event_id=args.internal_event_id,
+            synthetic_purchased_at=args.synthetic_purchased_at, quantity_as_of=args.quantity_as_of, policy=policy,
+            require_committed_generator=not args.allow_uncommitted_generator,
+            allow_unconfirmed_ledger=args.allow_unconfirmed_ledger,
+        )
+        print(json.dumps({"manifest": str(manifest), "manifestSha256": sha256(manifest.read_bytes()).hexdigest()}))
+        return 0
     if args.command == "compare":
         from .compare import compare_ledger, write_comparison
 

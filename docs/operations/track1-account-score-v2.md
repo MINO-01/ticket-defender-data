@@ -76,11 +76,12 @@ python -B -m evaluation.capstone_demo limit-input-v2 --ledger-dir <확정 원장
 | 정리 | `down -v`로 해당 프로젝트의 컨테이너와 익명 볼륨만 제거 |
 | 무결성 | `-ExpectedJarSha256` 필수. 불일치 시 Docker 호출 전에 중단 |
 | 비교 | `-ComparisonLedgerDir <고정 원장> -ComparisonOutputDir <외부 경로>`로 같은 격리 환경에서 score-v1과 score-v2 비교 |
-| 호환성 | 테스트 전용 조합을 Neo4j 5.20.0, GDS 2.6.6으로 결정. [GDS 공식 README](https://github.com/neo4j/graph-data-science/blob/master/README.adoc)의 2.6.x 호환표에 Neo4j 5.20.0이 있다. 운영 `docker-compose.yml`의 5.12.0은 변경하지 않았다 |
+| 호환성 | **Neo4j 5.20.0 + GDS 2.6.6은 실제로 기동되지 않는다.** 2026-11-08 실행에서 `LinkageError: GDS 2.6.6 is not compatible with Neo4j version: dev`로 Neo4j가 시작 단계에서 종료됐다. [GDS 공식 README](https://github.com/neo4j/graph-data-science/blob/master/README.adoc)의 `2.6.x` 행은 패치 버전 전체의 보장이 아니었고, JAR 내부 호환 모듈은 `4.4`, `5.11`~`5.19`뿐이다. 조합 재결정 전까지 테스트 고정값은 5.20.0으로 남아 있어 GDS를 실행할 수 없다. 운영 `docker-compose.yml`의 5.12.0은 변경하지 않았다 |
 | JAR 출처 | [GitHub 공식 릴리스 2.6.6](https://github.com/neo4j/graph-data-science/releases/tag/2.6.6)의 `neo4j-graph-data-science-2.6.6.jar` (58,452,898바이트, 2024-05-10 게시) |
 | JAR 체크섬 | GitHub API의 asset `digest`는 `null`이다. **공식 체크섬은 확인되지 않아** SHA-256은 내려받은 파일로 직접 계산해 기록한다. 이는 공식 값과의 대조가 아니라 고정값 기록이다 |
 | JAR 이름 | 기존 `td-issue19-gds-2.6.6.jar`는 공식 이름이 아니어서 공식 이름으로 바꿨다. 이름은 진위를 증명하지 않으며 출처와 크기, SHA-256 기록으로 판단한다 |
-| 준비 상태 | **미준비.** `neo4j:5.20.0` 이미지와 JAR 모두 로컬에 없다 |
+| 내려받은 파일 | JAR 크기 58,452,898바이트(릴리스 표기와 일치), 로컬 계산 SHA-256 `D951B83253B8FA01895ED5466DE8C63B6DD34DD53E818745D0D5C496FB516EFA`. 공식 체크섬과 대조한 값이 아니다. 이미지 `neo4j:5.20.0`은 `sha256:52d3dec8d45585b21edeca8517d752b2512e52aa94f80fc36a5788c88c95f8e4` |
+| 준비 상태 | **미실행.** 위 비호환으로 `gds.version()`과 `gds.louvain.stream`에 도달하지 못했다 |
 
 실행 절차는 다음과 같다. 다운로드는 승인 뒤에만 수행한다.
 

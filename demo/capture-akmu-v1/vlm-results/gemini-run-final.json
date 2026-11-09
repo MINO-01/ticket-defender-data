@@ -4,65 +4,65 @@
   "realExternalCall": true,
   "syntheticImagesOnly": true,
   "budgetExhausted": false,
-  "sdkCalls": 4,
+  "sdkCalls": 3,
   "results": [
     {
       "image": "listing_A",
-      "imageSha256": "38af848ec605b3980f42f5b38afe0fa6bb0abd1e6323d9efc1c2a72e54b522d3",
+      "imageSha256": "1cb9bf942c48404dd76439dfb27ad050757d8b5c423d4bd82c2ae0241a009405",
       "httpStatus": 502,
       "serverSchemaValidated": false,
-      "latencyMs": 8285,
+      "latencyMs": 3881,
       "status": 502,
       "code": "MODEL_RESPONSE_INVALID",
       "modelName": null,
       "fields": null,
       "humanTruth": {
-        "zone": "A",
-        "row": "1",
-        "seat": "9",
-        "askingPrice": 250000,
+        "zone": "19",
+        "row": "8",
+        "seat": "12",
+        "askingPrice": 200000,
         "targetCandidateResult": "MATCH_CANDIDATE"
       }
     },
     {
       "image": "listing_B",
-      "imageSha256": "940fe255e2175121162908c974d22f8f9d7bcad41d06cf64ccc89d51dfcd261c",
+      "imageSha256": "a93e55c294755100514e2c2462bcfeb5c9cc5f5e165f4ca340e4be2e13e9380c",
       "httpStatus": 502,
       "serverSchemaValidated": false,
-      "latencyMs": 4796,
+      "latencyMs": 2514,
       "status": 502,
       "code": "MODEL_RESPONSE_INVALID",
       "modelName": null,
       "fields": null,
       "humanTruth": {
-        "zone": "D",
+        "zone": "21",
         "row": "20",
-        "seat": "30",
+        "seat": "16",
         "askingPrice": 180000,
         "targetCandidateResult": "NO_MATCH"
       }
     },
     {
       "image": "listing_C",
-      "imageSha256": "7c6819e8b1bfa60ba1ad5fe05fe6d6ae3b38ca993f9cf945e4b401e1bf1736de",
+      "imageSha256": "b287190afba26e851cf4ea990625e410e332b71d940b9adb123bd6f114fe6ade",
       "httpStatus": 200,
       "serverSchemaValidated": true,
-      "latencyMs": 17819,
+      "latencyMs": 2927,
       "status": "COMPLETED",
       "code": null,
       "modelName": "gemini-3.1-flash-lite",
       "fields": {
         "eventName": {
           "state": "FOUND",
-          "value": "합성 캡스톤 라이브 2026",
-          "evidenceQuote": "합성 캡스톤 라이브 2026",
+          "value": "악동뮤지션 대전 콘서트 (합성 시연)",
+          "evidenceQuote": "악동뮤지션 대전 콘서트 (합성 시연)",
           "unknownReason": null,
           "candidates": []
         },
         "performanceAt": {
           "state": "FOUND",
-          "value": "2026년 12월 20일 19:30",
-          "evidenceQuote": "2026년 12월 20일 19:30",
+          "value": "2026년 12월 5일 18:00",
+          "evidenceQuote": "2026년 12월 5일 18:00",
           "unknownReason": null,
           "candidates": []
         },
@@ -76,24 +76,24 @@
         "askingPrice": {
           "state": "FOUND",
           "value": {
-            "raw": "200,000원",
-            "amount": "200000.00"
+            "raw": "190,000",
+            "amount": "190000.00"
           },
-          "evidenceQuote": "200,000원",
+          "evidenceQuote": "190,000원",
           "unknownReason": null,
           "candidates": []
         },
         "currency": {
           "state": "FOUND",
           "value": "KRW",
-          "evidenceQuote": "200,000원",
+          "evidenceQuote": "190,000원",
           "unknownReason": null,
           "candidates": []
         },
         "saleText": {
           "state": "FOUND",
-          "value": "티켓 양도 문의 주세요",
-          "evidenceQuote": "티켓 양도 문의 주세요",
+          "value": "좌석 정보는 가렸으니 문의해 주세요.",
+          "evidenceQuote": "좌석 정보는 가렸으니 문의해 주세요.",
           "unknownReason": null,
           "candidates": []
         },
@@ -123,7 +123,7 @@
         "zone": null,
         "row": null,
         "seat": null,
-        "askingPrice": 200000,
+        "askingPrice": 190000,
         "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"
       }
     }

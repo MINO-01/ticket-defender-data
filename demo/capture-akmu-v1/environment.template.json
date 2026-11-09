@@ -1,5 +1,5 @@
 {
-  "note": "격리 합성 환경에서 확정한 값을 사본에 기록합니다. 비밀값은 넣지 않습니다.",
+  "note": "격리 합성 환경에서 확정한 값을 사본에 기록합니다. 자리표시 값은 최종 식별자가 아니며 비밀값은 넣지 않습니다.",
   "tenantId": "<격리 합성 tenant UUID>",
   "eventId": "<격리 합성 event UUID>",
   "performanceId": "<ACTIVE 검증 회차 UUID>",

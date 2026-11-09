@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -19,6 +20,10 @@ def ticket(account, reservation, event, signal, token):
         "eventId": event,
         signal: token * 64,
     }
+
+
+def request_from(tickets):
+    return Track1AnalysisRequest.model_validate({"requestId": str(uuid4()), "tickets": tickets})
 
 
 def request(tickets):
@@ -210,6 +215,23 @@ class Track1GdsIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("projection-v2.1-account-relative-hub", response.algorithm_version)
         statuses = {item.performance_id: item.status for item in response.purchase_limit_evaluations}
         self.assertEqual(statuses, manifest["expected"]["evaluations"])
+
+    async def test_akmu_capture_ledger_keeps_linked_account_in_r2_only_cluster(self):
+        """촬영용 원장의 통합 사례 계정이 실제 Louvain에서 R2 계정끼리의 군집에 속하는지 확인합니다."""
+
+        ledger = Path(__file__).parent.parent / "demo" / "capture-akmu-v1" / "quantity_ledger.csv"
+        token = lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None  # noqa: E731
+        tickets = [
+            {"accountId": r[0], "reservationNo": f"{r[1]}#{r[2]}", "eventId": "akmu-test",
+             "paymentHash": token(r[7]), "addressHash": token(r[8]), "deviceIdHash": token(r[9]), "ipHash": token(r[10])}
+            for r in (line.split(",") for line in ledger.read_text(encoding="utf-8").splitlines() if line)
+        ]
+        response = await self.service.analyze_louvain(request_from(tickets))
+        groups = [sorted({m.account_id for m in cluster.members}) for cluster in response.clusters]
+        linked = [group for group in groups if "akmu-r2-3" in group]
+        self.assertEqual(len(linked), 1)
+        self.assertTrue(all(account.startswith("akmu-r2-") for account in linked[0]))
+        self.assertFalse(any(account.startswith(("akmu-r4-", "akmu-n2-")) for group in groups for account in group))
 
     async def test_concurrent_requests_are_isolated_and_cleaned(self):
         before_graphs = await self.graph_names()

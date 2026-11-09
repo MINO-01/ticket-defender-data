@@ -1,4 +1,4 @@
-"""촬영용 합성 원장과 listing_A/B/C 이미지를 demo/capture-v1에 만들고 무결성을 검증합니다.
+"""촬영용 합성 원장과 listing_A/B/C 이미지를 demo/capture-akmu-v1에 만들고 무결성을 검증합니다.
 
     .\\venv\\Scripts\\python.exe -B scripts\\generate_capture_demo.py          (생성)
     .\\venv\\Scripts\\python.exe -B scripts\\generate_capture_demo.py --verify (반입 전 검증)
@@ -14,21 +14,27 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUTPUT = ROOT / "demo" / "capture-v1"
+OUTPUT = ROOT / "demo" / "capture-akmu-v1"
 MANIFEST = "manifest.json"
 FONT_REGULAR = r"C:\Windows\Fonts\malgun.ttf"
 FONT_BOLD = r"C:\Windows\Fonts\malgunbd.ttf"
 
-SOURCE_VERSION = "capture-demo-ledger-v1"
-RESERVATION_SOURCE_VERSION = "capture-demo-reservations-v1"
+SOURCE_VERSION = "akmu-demo-ledger-v1"
+RESERVATION_SOURCE_VERSION = "akmu-demo-reservations-v1"
 SOURCE_AS_OF = "2026-11-08T10:00:00Z"
 QUANTITY_BASIS = "SYNTHETIC_PROVIDER_TICKET_LEDGER"
-EVENT_NAME = "합성 캡스톤 라이브 2026"
-PERFORMANCE_TEXT = "2026년 12월 20일 19:30"
-PERFORMANCE_REF = "CAPTURE-DEMO-20261220-1930"
+EVENT_NAME = "악동뮤지션 대전 콘서트 (합성 시연)"
+PERFORMANCE_TEXT = "2026년 12월 5일 18:00"
+PERFORMANCE_AT = "2026-12-05T18:00:00+09:00"
+VENUE = "대전 공연장 (가상)"
+ZONES = ("19", "20", "21")
+ROWS_PER_ZONE = 20
+SEATS_PER_ROW = 16
+PERFORMANCE_REF = "AKMU-DAEJEON-20261205-1800"
 PLATFORM = "합성중고장터"
-LINKED_RESERVATION = "capture-r2-res-3"
-LISTING_B_SEAT = ("D", "20", "30")
+LINKED_RESERVATION = "akmu-r2-res-3"
+LISTING_A_SEAT = ("19", "8", "12")
+LISTING_B_SEAT = ("21", "20", "16")
 
 
 def _row(account, reservation, line, tokens, purchased="2026-11-02T10:00:00Z", quantity=1, unit="TICKET", status="ACTIVE"):
@@ -42,34 +48,41 @@ def _row(account, reservation, line, tokens, purchased="2026-11-02T10:00:00Z", q
 def build_rows() -> list[dict]:
     rows = []
     for n in range(1, 7):
-        rows.append(_row(f"capture-r1-{n}", f"capture-r1-res-{n}", f"capture-r1-line-{n}", {"payment": "capture-r1-pay", "device": "capture-r1-device"}))
+        rows.append(_row(f"akmu-r1-{n}", f"akmu-r1-res-{n}", f"akmu-r1-line-{n}", {"payment": "akmu-r1-pay", "device": "akmu-r1-device"}))
     # R2는 결제와 기기가 사슬로 이어집니다. 실제 Louvain은 2개 커뮤니티로 분할한 실측이 있으며 입력으로 맞추지 않습니다.
-    chain = [{"payment": "capture-r2-pay-1"}, {"payment": "capture-r2-pay-1", "device": "capture-r2-device-1"},
-             {"payment": "capture-r2-pay-2", "device": "capture-r2-device-1"}, {"payment": "capture-r2-pay-2", "device": "capture-r2-device-2"},
-             {"device": "capture-r2-device-2"}]
+    chain = [{"payment": "akmu-r2-pay-1"}, {"payment": "akmu-r2-pay-1", "device": "akmu-r2-device-1"},
+             {"payment": "akmu-r2-pay-2", "device": "akmu-r2-device-1"}, {"payment": "akmu-r2-pay-2", "device": "akmu-r2-device-2"},
+             {"device": "akmu-r2-device-2"}]
     for n, tokens in enumerate(chain, start=1):
-        rows.append(_row(f"capture-r2-{n}", f"capture-r2-res-{n}", f"capture-r2-line-{n}", tokens))
+        rows.append(_row(f"akmu-r2-{n}", f"akmu-r2-res-{n}", f"akmu-r2-line-{n}", tokens))
     for n in range(1, 31):
-        rows.append(_row(f"capture-n2-{n:02d}", f"capture-n2-res-{n}", f"capture-n2-line-{n}", {"ip": "capture-n2-cgnat"},
+        rows.append(_row(f"akmu-n2-{n:02d}", f"akmu-n2-res-{n}", f"akmu-n2-line-{n}", {"ip": "akmu-n2-cgnat"},
                          purchased=f"2026-11-02T1{n % 2}:{n:02d}:00Z"))
     for n in range(1, 21):
-        rows.append(_row(f"capture-r4-{n:02d}", f"capture-r4-res-{n}", f"capture-r4-line-{n}", {"ip": "capture-r4-org"},
+        rows.append(_row(f"akmu-r4-{n:02d}", f"akmu-r4-res-{n}", f"akmu-r4-line-{n}", {"ip": "akmu-r4-org"},
                          purchased=f"2026-11-02T10:00:{n:02d}Z"))
-    rows.append(_row("capture-normal-1", "capture-normal-res-1", "capture-normal-line-1", {"payment": "capture-normal-pay-1"}))
+    rows.append(_row("akmu-normal-1", "akmu-normal-res-1", "akmu-normal-line-1", {"payment": "akmu-normal-pay-1"}))
     for seat in (1, 2):
-        rows.append(_row("capture-within", "capture-within-res", f"capture-within-line-{seat}", {"payment": "capture-within-pay"}))
+        rows.append(_row("akmu-within", "akmu-within-res", f"akmu-within-line-{seat}", {"payment": "akmu-within-pay"}))
     for seat in (1, 2, 3):
-        rows.append(_row("capture-over", "capture-over-res", f"capture-over-line-{seat}", {"payment": "capture-over-pay"}))
+        rows.append(_row("akmu-over", "akmu-over-res", f"akmu-over-line-{seat}", {"payment": "akmu-over-pay"}))
     return rows
 
 
 def assign_seats(rows: list[dict]) -> list[dict]:
-    """행 순서로 A~C 구역의 가상 좌석을 하나씩 배정합니다. listing_B 좌석은 쓰지 않습니다."""
+    """통합 사례는 listing_A 좌석에 고정하고 나머지는 행 순서로 배정합니다. listing_B 좌석은 쓰지 않습니다.
 
+    이 배정은 분석 결과를 보기 전에 정했습니다. run960과 고정 960석 원장을 읽거나 바꾸지 않습니다.
+    """
+
+    free = (
+        (zone, str(row), str(seat)) for zone in ZONES for row in range(1, ROWS_PER_ZONE + 1) for seat in range(1, SEATS_PER_ROW + 1)
+        if (zone, str(row), str(seat)) not in {LISTING_A_SEAT, LISTING_B_SEAT}
+    )
     snapshot = []
-    for index, row in enumerate(rows):
-        zone = "ABC"[index // 40]
-        snapshot.append({"reservation": row["reservation"], "zone": zone, "row": str(index % 40 // 10 + 1), "seat": str(index % 40 % 10 + 1), "line": row["line"]})
+    for row in rows:
+        zone, row_no, seat = LISTING_A_SEAT if row["reservation"] == LINKED_RESERVATION else next(free)
+        snapshot.append({"reservation": row["reservation"], "zone": zone, "row": row_no, "seat": seat, "line": row["line"]})
     return snapshot
 
 
@@ -88,14 +101,15 @@ def snapshot_csv(snapshot: list[dict]) -> bytes:
 def draw_listing(path: Path, title: str, lines: list[tuple[str, str]], body: list[str], masked: set[str]) -> None:
     from PIL import Image, ImageDraw, ImageFont
 
-    image = Image.new("RGB", (900, 760), (250, 250, 247))
+    image = Image.new("RGB", (900, 800), (250, 250, 247))
     draw = ImageDraw.Draw(image)
     heading = ImageFont.truetype(FONT_BOLD, 34)
     label = ImageFont.truetype(FONT_REGULAR, 28)
     small = ImageFont.truetype(FONT_REGULAR, 22)
     draw.rectangle((0, 0, 900, 86), fill=(39, 133, 230))
     draw.text((32, 22), f"{PLATFORM} 판매글", font=heading, fill="white")
-    draw.text((32, 112), title, font=heading, fill=(20, 30, 45))
+    if title:
+        draw.text((32, 112), title, font=heading, fill=(20, 30, 45))
     y = 186
     for name, value in lines:
         draw.text((32, y), f"{name}:", font=label, fill=(90, 100, 115))
@@ -110,7 +124,7 @@ def draw_listing(path: Path, title: str, lines: list[tuple[str, str]], body: lis
     for text in body:
         draw.text((32, y), text, font=label, fill=(45, 55, 70))
         y += 46
-    draw.text((32, 712), "시연용 합성 이미지입니다. 실제 공연이나 판매가 아닙니다.", font=small, fill=(130, 135, 145))
+    draw.text((32, 752), "시연용 합성 이미지입니다. 실제 공연이나 판매가 아닙니다.", font=small, fill=(130, 135, 145))
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, format="PNG", optimize=True)
 
@@ -122,33 +136,36 @@ def build() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     (OUTPUT / "quantity_ledger.csv").write_bytes(ledger_csv(rows))
     (OUTPUT / "reservation_snapshot.csv").write_bytes(snapshot_csv(snapshot))
-    common = [("공연", EVENT_NAME), ("회차", PERFORMANCE_TEXT)]
+    common = [("공연", EVENT_NAME), ("회차", PERFORMANCE_TEXT), ("장소", VENUE)]
     images = OUTPUT / "images"
     a_seat = (linked["zone"], linked["row"], linked["seat"])
-    draw_listing(images / "listing_A.png", "티켓 양도합니다", [*common, ("구역", a_seat[0]), ("열", a_seat[1]), ("좌석", a_seat[2]), ("판매가", "250,000원")],
+    if a_seat != LISTING_A_SEAT:
+        raise ValueError("linked reservation must hold the listing_A seat")
+    draw_listing(images / "listing_A.png", "", [*common, ("구역", a_seat[0]), ("열", a_seat[1]), ("좌석", a_seat[2]), ("판매가", "200,000원")],
                  ["일정이 안 맞아서 1장 양도합니다."], set())
-    draw_listing(images / "listing_B.png", "좋은 자리 양도", [*common, ("구역", LISTING_B_SEAT[0]), ("열", LISTING_B_SEAT[1]), ("좌석", LISTING_B_SEAT[2]), ("판매가", "180,000원")],
+    draw_listing(images / "listing_B.png", "", [*common, ("구역", LISTING_B_SEAT[0]), ("열", LISTING_B_SEAT[1]), ("좌석", LISTING_B_SEAT[2]), ("판매가", "180,000원")],
                  ["친구가 못 가게 되어 내놓습니다."], set())
-    draw_listing(images / "listing_C.png", "티켓 양도 문의 주세요", [*common, ("구역", ""), ("열", ""), ("좌석", ""), ("판매가", "200,000원")],
-                 ["좌석 정보는 개인정보라 가렸습니다.", "구매 의사 있으면 쪽지 주세요."], {"구역", "열", "좌석"})
+    draw_listing(images / "listing_C.png", "", [*common, ("구역", ""), ("열", ""), ("좌석", ""), ("판매가", "190,000원")],
+                 ["좌석 정보는 가렸으니 문의해 주세요."], {"구역", "열", "좌석"})
 
     tracked = ["quantity_ledger.csv", "reservation_snapshot.csv", "images/listing_A.png", "images/listing_B.png", "images/listing_C.png"]
     manifest = {
-        "fixtureVersion": "capture-demo-v1", "synthetic": True, "finalForImport": False,
+        "fixtureVersion": "akmu-capture-demo-v1", "synthetic": True, "finalForImport": False,
         "purpose": "격리 합성 환경의 촬영용 자료입니다. run960과 무관하며 실제 인물, 판매글, 개인정보가 없습니다.",
         "generator": "scripts/generate_capture_demo.py", "font": "malgun.ttf (Windows 시스템 글꼴, 저장소 미포함)",
         "import": {"sourceVersion": SOURCE_VERSION, "sourceAsOf": SOURCE_AS_OF, "quantityBasis": QUANTITY_BASIS, "completeSnapshot": True, "inputType": "INDIVIDUAL_TICKET", "reservationSourceVersion": RESERVATION_SOURCE_VERSION},
-        "performance": {"eventName": EVENT_NAME, "performanceText": PERFORMANCE_TEXT, "performanceRef": PERFORMANCE_REF},
-        "policyToRegister": {"maxTicketsPerAccount": 2, "policyVersion": "capture-demo-policy-r1", "effectiveFrom": "2026-11-01T00:00:00", "limitSubject": "ACCOUNT", "applicationScope": "PERFORMANCE", "cancellationRefundRule": "NETTED", "includesPresale": False},
+        "performance": {"eventName": EVENT_NAME, "performanceText": PERFORMANCE_TEXT, "performanceAt": PERFORMANCE_AT, "venue": VENUE, "zones": list(ZONES), "performanceRef": PERFORMANCE_REF},
+        "policyToRegister": {"maxTicketsPerAccount": 2, "policyVersion": "akmu-demo-policy-r1", "effectiveFrom": "2026-11-01T00:00:00", "limitSubject": "ACCOUNT", "applicationScope": "PERFORMANCE", "cancellationRefundRule": "NETTED", "includesPresale": False},
         "rowCounts": {"quantityLedger": len(rows), "reservationSnapshot": len(snapshot)},
-        "linkedCase": {"reservationReference": LINKED_RESERVATION, "account": "capture-r2-3", "seat": dict(zip(("zone", "row", "seat"), a_seat))},
+        "linkedCase": {"reservationReference": LINKED_RESERVATION, "account": "akmu-r2-3", "seat": dict(zip(("zone", "row", "seat"), a_seat))},
         "humanTruth": {
-            "listing_A": {"zone": a_seat[0], "row": a_seat[1], "seat": a_seat[2], "askingPrice": 250000, "targetCandidateResult": "MATCH_CANDIDATE"},
+            "listing_A": {"zone": a_seat[0], "row": a_seat[1], "seat": a_seat[2], "askingPrice": 200000, "targetCandidateResult": "MATCH_CANDIDATE"},
             "listing_B": {"zone": LISTING_B_SEAT[0], "row": LISTING_B_SEAT[1], "seat": LISTING_B_SEAT[2], "askingPrice": 180000, "targetCandidateResult": "NO_MATCH"},
-            "listing_C": {"zone": None, "row": None, "seat": None, "askingPrice": 200000, "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"},
+            "listing_C": {"zone": None, "row": None, "seat": None, "askingPrice": 190000, "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"},
         },
         "notes": ["targetCandidateResult는 목표이며 결과가 아닙니다. 실제 결과는 모델과 Backend가 결정합니다.",
-                  "R2는 실측에서 2개 커뮤니티로 분할되었습니다. capture-r2-3이 속한 군집을 Case 3에 사용합니다.",
+                  "고정 960석 원장의 19구역 8열 12번은 R2 패턴이 아니어서 그 원장을 쓰지 않고 이 시연 전용 원장을 별도로 고정했습니다.",
+                  "R2는 실측에서 2개 커뮤니티로 분할되었습니다. akmu-r2-3이 속한 군집을 Case 3에 사용합니다.",
                   "Backend 수량 원장에는 네트워크 유형 입력이 없어 R4, N2의 ipNetworkType은 화면에서 미확인으로 표시됩니다."],
         "files": {name: hashlib.sha256((OUTPUT / name).read_bytes()).hexdigest() for name in tracked},
     }

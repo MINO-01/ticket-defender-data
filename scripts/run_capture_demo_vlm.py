@@ -1,6 +1,6 @@
 """촬영용 합성 이미지 listing_A/B/C를 기존 FastAPI 경로와 실제 Gemini로 분석하고 결과를 기록합니다.
 
-    .\\venv\\Scripts\\python.exe -B scripts\\run_capture_demo_vlm.py --confirm-synthetic-external-call --output demo\\capture-v1\\vlm-results\\gemini-run.json
+    .\\venv\\Scripts\\python.exe -B scripts\\run_capture_demo_vlm.py --confirm-synthetic-external-call --output demo\\capture-akmu-v1\\vlm-results\\gemini-run.json
 
 manifest SHA-256이 맞는 합성 이미지만 전송합니다. 키와 요청 이미지는 결과에 기록하지 않습니다.
 Fake provider를 쓰지 않으며 응답을 수정하지 않습니다. GEMINI_API_KEY가 없으면 GEMINI_KEY_NOT_CONFIGURED로 종료합니다.

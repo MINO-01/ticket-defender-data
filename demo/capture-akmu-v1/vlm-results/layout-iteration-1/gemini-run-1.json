@@ -8,61 +8,61 @@
   "results": [
     {
       "image": "listing_A",
-      "imageSha256": "38af848ec605b3980f42f5b38afe0fa6bb0abd1e6323d9efc1c2a72e54b522d3",
+      "imageSha256": "dc73cfc8c5bbfff7ab290081f79c555973e9f7c0f2d4c7650cd6cb5392776dca",
       "httpStatus": 502,
       "serverSchemaValidated": false,
-      "latencyMs": 4897,
+      "latencyMs": 19979,
       "status": 502,
       "code": "MODEL_RESPONSE_INVALID",
       "modelName": null,
       "fields": null,
       "humanTruth": {
-        "zone": "A",
-        "row": "1",
-        "seat": "9",
-        "askingPrice": 250000,
+        "zone": "19",
+        "row": "8",
+        "seat": "12",
+        "askingPrice": 200000,
         "targetCandidateResult": "MATCH_CANDIDATE"
       }
     },
     {
       "image": "listing_B",
-      "imageSha256": "940fe255e2175121162908c974d22f8f9d7bcad41d06cf64ccc89d51dfcd261c",
+      "imageSha256": "f0cc8648eae5f2d2585a2a8aa7177866826aa7cf180baa0d5906a40d2783778e",
       "httpStatus": 502,
       "serverSchemaValidated": false,
-      "latencyMs": 4370,
+      "latencyMs": 2727,
       "status": 502,
       "code": "MODEL_RESPONSE_INVALID",
       "modelName": null,
       "fields": null,
       "humanTruth": {
-        "zone": "D",
+        "zone": "21",
         "row": "20",
-        "seat": "30",
+        "seat": "16",
         "askingPrice": 180000,
         "targetCandidateResult": "NO_MATCH"
       }
     },
     {
       "image": "listing_C",
-      "imageSha256": "7c6819e8b1bfa60ba1ad5fe05fe6d6ae3b38ca993f9cf945e4b401e1bf1736de",
+      "imageSha256": "e3a3b269c846918711ace16b45ed15d53ed2261dfdd267387dc9ec9e0dccd794",
       "httpStatus": 200,
       "serverSchemaValidated": true,
-      "latencyMs": 3113,
+      "latencyMs": 5319,
       "status": "COMPLETED",
       "code": null,
       "modelName": "gemini-3.1-flash-lite",
       "fields": {
         "eventName": {
           "state": "FOUND",
-          "value": "합성 캡스톤 라이브 2026",
-          "evidenceQuote": "합성 캡스톤 라이브 2026",
+          "value": "악동뮤지션 대전 콘서트 (합성 시연)",
+          "evidenceQuote": "악동뮤지션 대전 콘서트 (합성 시연)",
           "unknownReason": null,
           "candidates": []
         },
         "performanceAt": {
           "state": "FOUND",
-          "value": "2026년 12월 20일 19:30",
-          "evidenceQuote": "2026년 12월 20일 19:30",
+          "value": "2026년 12월 5일 18:00",
+          "evidenceQuote": "2026년 12월 5일 18:00",
           "unknownReason": null,
           "candidates": []
         },
@@ -76,17 +76,17 @@
         "askingPrice": {
           "state": "FOUND",
           "value": {
-            "raw": "200,000원",
-            "amount": "200000.00"
+            "raw": "190,000원",
+            "amount": "190000.00"
           },
-          "evidenceQuote": "200,000원",
+          "evidenceQuote": "190,000원",
           "unknownReason": null,
           "candidates": []
         },
         "currency": {
           "state": "FOUND",
           "value": "KRW",
-          "evidenceQuote": "원",
+          "evidenceQuote": "190,000원",
           "unknownReason": null,
           "candidates": []
         },
@@ -123,7 +123,7 @@
         "zone": null,
         "row": null,
         "seat": null,
-        "askingPrice": 200000,
+        "askingPrice": 190000,
         "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"
       }
     }

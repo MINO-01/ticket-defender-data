@@ -50,6 +50,25 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 - 정책과 범위 외의 스키마 오류 코드가 `ContractError`에 없어 기존 `{"detail": [{"code": ...}]}` 형식을 유지했다.
 - 같은 `eventId` 안에서 `(accountId, reservationNo, eventId)`는 응답 `members` 식별자이므로 요청 전체에서 중복을 거부한다.
 
+### Backend #79 입력 계약 대조 (Backend `8d8f37a`, YAML은 `eed2106`과 동일)
+
+계약 상태는 여전히 `PROPOSED_FOR_CROSS_REPOSITORY_REVIEW`다. YAML의 `x-backend-input-contract`는 Data 변경 항목을 나열하지만 필드의 위치, 타입, 필수 여부와 응답 상태 스키마가 없다. 양쪽에서 확정된 불일치가 아니므로 Data 코드는 변경하지 않았다. 계정별 집계를 개별 티켓 DTO로 꾸며 보내지 않는다.
+
+| 구분 | 내용 | 상태 |
+| --- | --- | --- |
+| 현재 호환 경로 | Spring `PurchaseLimitQuantityInputContract.assess`가 `READY_FOR_INDIVIDUAL_TICKET_V2`인 입력만 현재 v2 `tickets`로 변환 | Data 구현됨, Spring 호출 미연결 |
+| 정책 의미 값 미확인 | Spring이 `policyVerificationStatus=POLICY_NOT_CONFIRMED`, `policy=null`로 전송 → `POLICY_NOT_CONFIRMED` | Data 구현됨 |
+| 수량 사실 누락 | Spring이 `quantityDataStatus=INCOMPLETE` 또는 `UNKNOWN`으로 전송 → `QUANTITY_DATA_INCOMPLETE` | Data 구현됨 |
+| `purchasedAt > quantityAsOf` | 회차 전체 `QUANTITY_DATA_INCOMPLETE`, 같은 시각은 평가 | Data 구현됨(`e999247`), YAML 반영 OPEN |
+| `ACCOUNT_LIMIT_SNAPSHOT` | Spring은 `ACCOUNT_SNAPSHOT_NOT_SUPPORTED_BY_DATA_V2`로 분리하고 Data를 호출하지 않아야 한다 | Data 미지원, BLOCKED |
+
+새 계약에서 확정이 필요한 항목은 다음과 같다. 확정 전에는 구현하지 않는다.
+
+- 요청: `quantityInputType`의 위치(요청, 범위, 행 단위), 스냅샷 행의 스키마와 `tickets` 공존 여부, 개별 티켓의 `ticketStatus`, `sourceVersion`, `sourceAsOf`를 행 단위로 받을지 여부, 정책의 `limitSubject`, `applicationScope`, `salesPhaseRef`, `cancellationRefundRule`, `includesPresale` 전달 방식.
+- 응답: 지원하지 않는 입력의 상태값. `QUANTITY_DATA_INCOMPLETE`로 묶을지 별도 상태를 추가할지 정해야 하며, `EVALUATED`나 빈 결과로 표현하면 안 된다.
+- 상태 전이: `GROSS` 규칙과 `CANCELLED`, `REFUNDED`, `UNKNOWN` 티켓의 수량 처리, `purchaseLimitCalculationQuantity`와 `currentEffectiveTicketQuantity` 중 판정 기준, `PERSON` 주체에 필요한 고객사 승인 신원 근거.
+- Backend 반영점: YAML 스키마 확정, `purchasedAt > quantityAsOf` 규칙 명시, Spring v2 어댑터와 응답 저장, 평가 불가 상태를 위반 없음으로 바꾸지 않는 처리.
+
 ## 시연용 v2 분석 입력
 
 `track1_ingest.json`은 v1 형식이며 v2에 필요한 값의 출처는 다음과 같다.

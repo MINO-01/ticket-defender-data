@@ -33,6 +33,7 @@ def main(argv=None) -> int:
     parser.add_argument(CONFIRM_FLAG, dest="confirmed", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-calls", type=int, default=6)
+    parser.add_argument("--only", nargs="+", choices=IMAGES, help="분석할 이미지만 선택합니다. 생략하면 3장 전체입니다")
     args = parser.parse_args(argv)
     if not args.confirmed:
         print(f"{CONFIRM_FLAG} 없이는 외부 호출을 하지 않습니다.", file=sys.stderr)
@@ -40,6 +41,7 @@ def main(argv=None) -> int:
     if not 1 <= args.max_calls <= 12:
         print("--max-calls 는 1 이상 12 이하만 허용합니다.", file=sys.stderr)
         return 2
+    selected = tuple(args.only) if args.only else IMAGES
     values = dotenv_values(ROOT / ".env")
     api_key = os.getenv("GEMINI_API_KEY") or values.get("GEMINI_API_KEY") or ""
     if not api_key:
@@ -65,7 +67,7 @@ def main(argv=None) -> int:
     manifest = json.loads((OUTPUT / MANIFEST).read_text(encoding="utf-8"))
     results = []
     with TestClient(app) as client:
-        for name in IMAGES:
+        for name in selected:
             data = (OUTPUT / "images" / f"{name}.png").read_bytes()
             digest = hashlib.sha256(data).hexdigest()
             started = time.perf_counter()
@@ -88,7 +90,7 @@ def main(argv=None) -> int:
     report = {"provider": "gemini", "configuredModel": model, "realExternalCall": True, "syntheticImagesOnly": True, "budgetExhausted": meter.exhausted, "sdkCalls": len(meter.calls), "results": results}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if all(item["httpStatus"] == 200 for item in results) and len(results) == len(IMAGES) else 1
+    return 0 if all(item["httpStatus"] == 200 for item in results) and len(results) == len(selected) else 1
 
 
 if __name__ == "__main__":

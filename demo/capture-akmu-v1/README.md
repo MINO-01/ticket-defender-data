@@ -21,7 +21,7 @@
 
 | 이미지 | 내용 | 목표 (결과 아님) |
 | --- | --- | --- |
-| listing_A | 19구역 8열 12번, 200,000원 | MATCH_CANDIDATE. 예매참조 `akmu-r2-res-3` |
+| listing_A | 19구역 8열 12번, 200,000원 (KRW) | MATCH_CANDIDATE. 예매참조 `akmu-r2-res-3` |
 | listing_B | 21구역 20열 16번, 180,000원. 원장에 없는 좌석 | NO_MATCH |
 | listing_C | 좌석 가림, 190,000원 | UNKNOWN 또는 UNVERIFIABLE |
 
@@ -39,8 +39,11 @@
 | --- | --- | --- | --- |
 | `layout-iteration-1` 1차 | 502 | 502 | 200, 좌석 UNKNOWN |
 | `layout-iteration-1` 2차 | 502 | 502 | 502 |
-| `gemini-run-final` (현재 이미지) | 502 | 502 | 200, 좌석 UNKNOWN |
+| `gemini-run-final` (KRW 표기 전) | 502 | 502 | 200, 좌석 UNKNOWN |
+| `gemini-run-krw` (현재 listing_A, 1회) | 200 COMPLETED, 19/8/12 FOUND, 통화 KRW, 200000 | 호출 안 함 | 호출 안 함 |
 
-현재 이미지의 listing_A를 직접 4회 샘플링한 결과 1회 통과(19/8/12 FOUND), 3회는 기존 `invalid_currency` 검증으로 거부됐습니다. 모델이 통화를 ISO 3자 코드가 아닌 값으로 내는 경우입니다. 검증과 프롬프트는 변경하지 않았고 응답도 수정하지 않았습니다. 500 오류와 시간 초과는 없었습니다.
+KRW 표기 전 이미지의 listing_A를 직접 4회 샘플링한 결과 1회 통과(19/8/12 FOUND), 3회는 기존 `invalid_currency` 검증으로 거부됐습니다. 모델이 통화를 ISO 3자 코드가 아닌 값으로 내는 경우입니다. 검증과 프롬프트는 변경하지 않았고 응답도 수정하지 않았습니다. 500 오류와 시간 초과는 없었습니다.
+
+판매가 표시를 "200,000원 (KRW)"로 바꾼 뒤 1회 호출은 통과했습니다. 1회 결과이므로 항상 통과한다는 뜻은 아닙니다. listing_B는 KRW 표기 없이 그대로여서 같은 거부가 남아 있을 수 있습니다.
 
 후보 대조(MATCH_CANDIDATE, NO_MATCH)와 LINKED는 Backend를 실행하지 않아 실제로 검증되지 않았습니다.

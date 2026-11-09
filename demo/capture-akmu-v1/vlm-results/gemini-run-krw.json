@@ -1,0 +1,97 @@
+{
+  "provider": "gemini",
+  "configuredModel": "gemini-3.1-flash-lite",
+  "realExternalCall": true,
+  "syntheticImagesOnly": true,
+  "budgetExhausted": false,
+  "sdkCalls": 1,
+  "results": [
+    {
+      "image": "listing_A",
+      "imageSha256": "35b22f6d95fbbbee6d5a7646e919e7535013bee174a55dbff665c053afd0b54b",
+      "httpStatus": 200,
+      "serverSchemaValidated": true,
+      "latencyMs": 12064,
+      "status": "COMPLETED",
+      "code": null,
+      "modelName": "gemini-3.1-flash-lite",
+      "fields": {
+        "eventName": {
+          "state": "FOUND",
+          "value": "악동뮤지션 대전 콘서트 (합성 시연)",
+          "evidenceQuote": "악동뮤지션 대전 콘서트 (합성 시연)",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "performanceAt": {
+          "state": "FOUND",
+          "value": "2026년 12월 5일 18:00",
+          "evidenceQuote": "2026년 12월 5일 18:00",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "platformDisplayName": {
+          "state": "FOUND",
+          "value": "합성중고장터",
+          "evidenceQuote": "합성중고장터",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "askingPrice": {
+          "state": "FOUND",
+          "value": {
+            "raw": "200,000",
+            "amount": "200000.00"
+          },
+          "evidenceQuote": "200,000원",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "currency": {
+          "state": "FOUND",
+          "value": "KRW",
+          "evidenceQuote": "(KRW)",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "saleText": {
+          "state": "FOUND",
+          "value": "일정이 안 맞아서 1장 양도합니다.",
+          "evidenceQuote": "일정이 안 맞아서 1장 양도합니다.",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "zone": {
+          "state": "FOUND",
+          "value": "19",
+          "evidenceQuote": "19",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "row": {
+          "state": "FOUND",
+          "value": "8",
+          "evidenceQuote": "8",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "seat": {
+          "state": "FOUND",
+          "value": "12",
+          "evidenceQuote": "12",
+          "unknownReason": null,
+          "candidates": []
+        }
+      },
+      "humanTruth": {
+        "zone": "19",
+        "row": "8",
+        "seat": "12",
+        "askingPrice": 200000,
+        "displayPrice": "200,000원 (KRW)",
+        "currency": "KRW",
+        "targetCandidateResult": "MATCH_CANDIDATE"
+      }
+    }
+  ]
+}

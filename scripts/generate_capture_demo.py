@@ -34,6 +34,7 @@ PERFORMANCE_REF = "AKMU-DAEJEON-20261205-1800"
 PLATFORM = "합성중고장터"
 LINKED_RESERVATION = "akmu-r2-res-3"
 LISTING_A_SEAT = ("19", "8", "12")
+LISTING_A_PRICE_TEXT = "200,000원 (KRW)"
 LISTING_B_SEAT = ("21", "20", "16")
 
 
@@ -141,7 +142,7 @@ def build() -> None:
     a_seat = (linked["zone"], linked["row"], linked["seat"])
     if a_seat != LISTING_A_SEAT:
         raise ValueError("linked reservation must hold the listing_A seat")
-    draw_listing(images / "listing_A.png", "", [*common, ("구역", a_seat[0]), ("열", a_seat[1]), ("좌석", a_seat[2]), ("판매가", "200,000원")],
+    draw_listing(images / "listing_A.png", "", [*common, ("구역", a_seat[0]), ("열", a_seat[1]), ("좌석", a_seat[2]), ("판매가", LISTING_A_PRICE_TEXT)],
                  ["일정이 안 맞아서 1장 양도합니다."], set())
     draw_listing(images / "listing_B.png", "", [*common, ("구역", LISTING_B_SEAT[0]), ("열", LISTING_B_SEAT[1]), ("좌석", LISTING_B_SEAT[2]), ("판매가", "180,000원")],
                  ["친구가 못 가게 되어 내놓습니다."], set())
@@ -159,7 +160,7 @@ def build() -> None:
         "rowCounts": {"quantityLedger": len(rows), "reservationSnapshot": len(snapshot)},
         "linkedCase": {"reservationReference": LINKED_RESERVATION, "account": "akmu-r2-3", "seat": dict(zip(("zone", "row", "seat"), a_seat))},
         "humanTruth": {
-            "listing_A": {"zone": a_seat[0], "row": a_seat[1], "seat": a_seat[2], "askingPrice": 200000, "targetCandidateResult": "MATCH_CANDIDATE"},
+            "listing_A": {"zone": a_seat[0], "row": a_seat[1], "seat": a_seat[2], "askingPrice": 200000, "displayPrice": LISTING_A_PRICE_TEXT, "currency": "KRW", "targetCandidateResult": "MATCH_CANDIDATE"},
             "listing_B": {"zone": LISTING_B_SEAT[0], "row": LISTING_B_SEAT[1], "seat": LISTING_B_SEAT[2], "askingPrice": 180000, "targetCandidateResult": "NO_MATCH"},
             "listing_C": {"zone": None, "row": None, "seat": None, "askingPrice": 190000, "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"},
         },

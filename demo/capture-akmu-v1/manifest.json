@@ -53,6 +53,8 @@
       "row": "8",
       "seat": "12",
       "askingPrice": 200000,
+      "displayPrice": "200,000원 (KRW)",
+      "currency": "KRW",
       "targetCandidateResult": "MATCH_CANDIDATE"
     },
     "listing_B": {
@@ -79,7 +81,7 @@
   "files": {
     "quantity_ledger.csv": "ced00276c9afd3dde87951e322ed8f1f8772d6a1fc0e6d518ba1dc9748c03889",
     "reservation_snapshot.csv": "8b6b97d47cc9df7058920d1dff177c6f0ae7d695a878126328ba4a0c6ed38334",
-    "images/listing_A.png": "1cb9bf942c48404dd76439dfb27ad050757d8b5c423d4bd82c2ae0241a009405",
+    "images/listing_A.png": "35b22f6d95fbbbee6d5a7646e919e7535013bee174a55dbff665c053afd0b54b",
     "images/listing_B.png": "a93e55c294755100514e2c2462bcfeb5c9cc5f5e165f4ca340e4be2e13e9380c",
     "images/listing_C.png": "b287190afba26e851cf4ea990625e410e332b71d940b9adb123bd6f114fe6ade"
   }

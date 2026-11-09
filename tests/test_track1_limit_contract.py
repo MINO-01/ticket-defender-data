@@ -18,6 +18,7 @@ INTERNAL_A, PERFORMANCE_A = "11111111-1111-4111-8111-111111111111", "22222222-22
 INTERNAL_B, PERFORMANCE_B = "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"
 PAY = "a" * 64
 DEV = "b" * 64
+_ABSENT = object()
 
 
 def policy(maximum=2, version="event-a-r1", until=None):
@@ -199,6 +200,92 @@ class LimitContractTests(unittest.TestCase):
                 ]))
                 self.assertEqual(result["status"], status)
                 self.assertEqual(len(result["accountLimitFindings"]), 1 if status == "EVALUATED" else 0)
+
+    def individual(self, reservation="r1", reference="line-1", quantity=1, account="account-1", **overrides):
+        values = {
+            "quantityInputType": "INDIVIDUAL_TICKET", "ticketReference": reference, "ticketStatus": "ACTIVE",
+            "sourceVersion": "snapshot-a", "sourceAsOf": "2026-11-08T10:00:00Z", "paymentHash": PAY, **overrides,
+        }
+        return ticket(account, reservation, quantity, **{k: v for k, v in values.items() if v is not _ABSENT})
+
+    def test_ticket_lines_of_one_reservation_sum_once_per_line(self):
+        result = self.evaluation(body([
+            self.individual(reference="line-1"), self.individual(reference="line-2"), self.individual(reference="line-3"),
+        ]))
+        self.assertEqual(result["status"], "EVALUATED")
+        self.assertEqual(result["accountLimitFindings"][0]["effectiveTicketQuantity"], 3)
+        self.assertEqual(result["accountLimitFindings"][0]["reservationQuantities"], [
+            {"reservationNo": "r1", "effectiveTicketQuantity": 3},
+        ])
+
+    def test_same_ticket_line_twice_is_rejected_not_counted(self):
+        response = self.post(body([self.individual(), self.individual()]))
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"], [{"code": "DUPLICATE_TICKET"}])
+
+    def test_reservation_rows_without_ticket_reference_stay_rejected(self):
+        response = self.post(body([ticket(paymentHash=PAY), ticket(paymentHash=PAY)]))
+        self.assertEqual(response.status_code, 422)
+
+    def test_rows_that_cannot_be_deduplicated_are_never_evaluated(self):
+        cases = {
+            "mixed reference": [self.individual(), self.individual(reference=_ABSENT)],
+            "reference reused": [self.individual("r1", "line-1"), self.individual("r2", "line-1")],
+            "mixed input type": [self.individual("r1"), ticket(reservation="r2", paymentHash=PAY)],
+            "reference without type": [self.individual(quantityInputType=_ABSENT)],
+        }
+        for name, rows in cases.items():
+            with self.subTest(name=name):
+                for row in rows:
+                    row["effectiveTicketQuantity"] = 9
+                result = self.evaluation(body(rows))
+                self.assertEqual(result["status"], "QUANTITY_DATA_INCOMPLETE")
+                self.assertEqual(result["accountLimitFindings"], [])
+
+    def test_unconfirmed_ticket_facts_are_never_evaluated(self):
+        cases = {
+            "status absent": {"ticketStatus": _ABSENT},
+            "status unknown": {"ticketStatus": "UNKNOWN"},
+            "cancelled undecided": {"ticketStatus": "CANCELLED"},
+            "refunded undecided": {"ticketStatus": "REFUNDED"},
+            "version absent": {"sourceVersion": _ABSENT},
+            "version differs": {"sourceVersion": "snapshot-b"},
+            "as-of absent": {"sourceAsOf": _ABSENT},
+            "as-of after snapshot": {"sourceAsOf": "2026-11-08T10:00:01Z"},
+            "purchase after source": {"sourceAsOf": "2026-11-02T09:59:59Z"},
+        }
+        for name, overrides in cases.items():
+            with self.subTest(name=name):
+                result = self.evaluation(body([self.individual(quantity=9, **overrides)]))
+                self.assertEqual(result["status"], "QUANTITY_DATA_INCOMPLETE")
+                self.assertEqual(result["accountLimitFindings"], [])
+
+    def test_aggregate_snapshot_is_not_accepted_as_ticket_input(self):
+        for name, row in {
+            "type": self.individual(quantityInputType="ACCOUNT_LIMIT_SNAPSHOT"),
+            "quantity": {**self.individual(), "purchaseLimitCalculationQuantity": 2},
+            "granularity": {**self.individual(), "quantityGranularity": "TICKET"},
+        }.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.post(body([row])).status_code, 422)
+        self.assertEqual(
+            self.post(body([self.individual(quantityInputType="ACCOUNT_LIMIT_SNAPSHOT")])).json()["detail"],
+            [{"code": "UNSUPPORTED_QUANTITY_INPUT_TYPE"}],
+        )
+
+    def test_multi_line_reservation_stays_one_cluster_member(self):
+        self.session.rows = [
+            {"accountIndex": 0, "communityId": 1}, {"accountIndex": 1, "communityId": 1},
+            {"accountIndex": -1, "communityId": 1},
+        ]
+        data = self.post(body([
+            self.individual(reference="line-1", account="a"), self.individual(reference="line-2", account="a"),
+            self.individual("r2", "line-3", account="b"),
+        ])).json()
+        self.assertEqual(
+            sorted((m["accountId"], m["reservationNo"]) for m in data["clusters"][0]["members"]),
+            [("a", "r1"), ("b", "r2")],
+        )
 
     def test_policy_interval_boundaries(self):
         """시작 시각은 평가하고 종료 시각은 판정하지 않는 잠정 경계입니다."""

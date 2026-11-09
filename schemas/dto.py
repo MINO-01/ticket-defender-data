@@ -201,16 +201,37 @@ class Track1LimitTicketInput(BaseModel):
     address_hash: Optional[HashToken] = Field(default=None, alias="addressHash")
     device_id_hash: Optional[HashToken] = Field(default=None, alias="deviceIdHash")
     ip_hash: Optional[HashToken] = Field(default=None, alias="ipHash")
+    # 아래 입력 출처 필드는 Backend #79 YAML이 요구한 항목의 선택 필드입니다. 값이 없으면 기존 예매 단위 입력으로 처리합니다.
+    # 집계 스냅샷은 이 모델로 받지 않으며 quantityGranularity는 값 정의 전이라 받지 않습니다.
+    quantity_input_type: Optional[Literal["INDIVIDUAL_TICKET"]] = Field(default=None, alias="quantityInputType")
+    ticket_reference: Optional[TicketIdentifier] = Field(default=None, alias="ticketReference")
+    ticket_status: Optional[Literal["ACTIVE", "CANCELLED", "REFUNDED", "UNKNOWN"]] = Field(default=None, alias="ticketStatus")
+    source_version: Optional[PolicyVersion] = Field(default=None, alias="sourceVersion")
+    source_as_of: Optional[AwareDatetime] = Field(default=None, alias="sourceAsOf")
 
     @model_validator(mode="after")
     def validate_ticket(self):
         if not all((self.account_id.strip(), self.reservation_no.strip(), self.event_id.strip())):
+            raise PydanticCustomError("invalid_identifier", "Ticket identifiers must not be blank")
+        if self.ticket_reference is not None and not self.ticket_reference.strip():
             raise PydanticCustomError("invalid_identifier", "Ticket identifiers must not be blank")
         return self
 
     @property
     def key(self) -> tuple[str, str, str]:
         return self.account_id, self.reservation_no, self.event_id
+
+    @property
+    def row_identity(self) -> tuple[str, str, str, str | None]:
+        """중복 판단 단위입니다. 다좌석 예매의 행은 ticketReference로만 구분합니다."""
+
+        return (*self.key, self.ticket_reference)
+
+    @property
+    def has_input_provenance(self) -> bool:
+        return any(value is not None for value in (
+            self.quantity_input_type, self.ticket_reference, self.ticket_status, self.source_version, self.source_as_of,
+        ))
 
     @property
     def analysis_scope(self) -> str:
@@ -235,7 +256,7 @@ class Track1LimitAnalysisRequest(BaseModel):
         for ticket in self.tickets:
             if scope_events.get(ticket.analysis_scope) != ticket.event_id:
                 raise PydanticCustomError("TICKET_SCOPE_MISMATCH", "ticket must match one performance scope")
-        keys = [ticket.key for ticket in self.tickets]
+        keys = [ticket.row_identity for ticket in self.tickets]
         if len(keys) != len(set(keys)):
             raise PydanticCustomError("duplicate_ticket", "Duplicate ticket identifiers are not allowed")
         return self

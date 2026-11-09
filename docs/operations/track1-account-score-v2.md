@@ -69,6 +69,24 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 - 상태 전이: `GROSS` 규칙과 `CANCELLED`, `REFUNDED`, `UNKNOWN` 티켓의 수량 처리, `purchaseLimitCalculationQuantity`와 `currentEffectiveTicketQuantity` 중 판정 기준, `PERSON` 주체에 필요한 고객사 승인 신원 근거.
 - Backend 반영점: YAML 스키마 확정, `purchasedAt > quantityAsOf` 규칙 명시, Spring v2 어댑터와 응답 저장, 평가 불가 상태를 위반 없음으로 바꾸지 않는 처리.
 
+### 개별 티켓 입력 처리 (Backend PR #80 `82c5899` 대응)
+
+v2 `tickets`에 Backend YAML이 이름을 정한 선택 필드를 받는다. Spring v2 DTO는 아직 이 필드를 보내지 않으므로 **Data 구현 완료, Spring 통합 대기**다. 필드가 없는 기존 요청의 동작은 바뀌지 않는다. 아래 규칙은 평가를 막기만 하며 finding이나 점수를 새로 만들지 않는다. 계약 확정 시 바뀔 수 있는 잠정 동작이다.
+
+| 입력 | 결과 |
+| --- | --- |
+| `quantityInputType: INDIVIDUAL_TICKET`, `ticketReference`, `ticketStatus: ACTIVE`, `sourceVersion`, `sourceAsOf` 모두 일치 | 행 수량을 합산해 평가 |
+| 같은 `(accountId, reservationNo, eventId, ticketReference)` 재전송 | 422 `DUPLICATE_TICKET`. 합산하지 않음 |
+| 같은 예매의 여러 행에 `ticketReference`가 없음 | 기존과 같이 422 또는 `QUANTITY_DATA_INCOMPLETE` |
+| `ticketReference`가 다른 예매에서 재사용, 입력 유형 혼합, 유형 없이 출처 값만 존재 | `QUANTITY_DATA_INCOMPLETE` |
+| `ticketStatus`가 없거나 `UNKNOWN`, `CANCELLED`, `REFUNDED` | `QUANTITY_DATA_INCOMPLETE`. 취소와 환불의 수량 처리는 미확정이다 |
+| `sourceVersion`이 없거나 회차 `quantitySourceVersion`과 다름 | `QUANTITY_DATA_INCOMPLETE` |
+| `sourceAsOf`가 없거나 `quantityAsOf` 이후, `purchasedAt`이 `sourceAsOf` 이후 | `QUANTITY_DATA_INCOMPLETE` |
+| `ACCOUNT_LIMIT_SNAPSHOT` 또는 집계 필드 | 422. 개별 티켓 DTO로 받지 않는다 |
+| `quantityGranularity` | 422. 값 정의 전이라 받지 않는다 |
+
+다좌석 예매의 여러 행은 응답 `members`와 `reservationQuantities`에서 예매 하나로 합친다. Louvain 투영, score-v2, v1 경로, `algorithmVersion`은 변경하지 않았다.
+
 ## 시연용 v2 분석 입력
 
 `track1_ingest.json`은 v1 형식이며 v2에 필요한 값의 출처는 다음과 같다.

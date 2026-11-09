@@ -84,6 +84,8 @@ async def track1_validation_error(request: Request, exc: RequestValidationError)
             codes.add("INVALID_JSON")
         elif error_type in {"duplicate_ticket", "missing_connection_token", "invalid_identifier"}:
             codes.add(error_type.upper())
+        elif field == "quantityInputType":
+            codes.add("UNSUPPORTED_QUANTITY_INPUT_TYPE")
         elif field == "requestId":
             codes.add("INVALID_UUID")
         elif field in token_fields:

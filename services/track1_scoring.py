@@ -7,7 +7,7 @@ Neo4j에 의존하지 않으며 입력의 예매 목록만으로 결정적으로
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -275,7 +275,10 @@ def clusters_from_account_communities(
         shared = community_shared_tokens(members, graph)
         if not any(shared.values()):
             continue
-        tickets = sorted((t for member in members for t in member.tickets), key=lambda t: t.key)
+        # 다좌석 예매의 여러 행도 응답 members에서는 예매 하나로 유지합니다.
+        tickets = sorted(
+            {t.key: t for member in members for t in member.tickets}.values(), key=lambda t: t.key
+        )
         member_keys = [t.key for t in tickets]
         identity = json.dumps(
             [str(request.request_id), member_keys], ensure_ascii=False, separators=(",", ":")
@@ -338,6 +341,47 @@ def unit_row_quantities(tickets: Iterable[Track1Ticket]) -> dict[AccountKey, int
     return {key: account.ticket_count for key, account in aggregate_accounts(tickets).items()}
 
 
+def _reservation_totals(tickets) -> dict[str, int]:
+    """같은 예매의 여러 티켓 행을 예매 단위 수량으로 합칩니다."""
+
+    totals: Counter[str] = Counter()
+    for ticket in tickets:
+        totals[ticket.reservation_no] += ticket.effective_ticket_quantity
+    return dict(totals)
+
+
+def _quantity_rows_are_trustworthy(scope, tickets) -> bool:
+    """입력 행으로 계정 수량을 합산해도 되는지 확인합니다. 실패하면 평가하지 않을 뿐 다른 결과를 만들지 않습니다."""
+
+    # 스냅샷 기준 시각 이후의 구매는 수량에 반영됐다고 볼 수 없습니다.
+    if any(ticket.purchased_at > scope.quantity_as_of for ticket in tickets):
+        return False
+    typed = [ticket for ticket in tickets if ticket.quantity_input_type is not None]
+    if not typed:
+        # 입력 유형 없이 일부 출처 값만 있으면 어떤 단위의 수량인지 알 수 없습니다.
+        return not any(ticket.has_input_provenance for ticket in tickets)
+    if len(typed) != len(tickets):
+        return False
+
+    rows_per_reservation = Counter(ticket.key for ticket in tickets)
+    reservation_of_reference: dict[str, tuple[str, str, str]] = {}
+    for ticket in tickets:
+        if ticket.ticket_status != "ACTIVE" or ticket.source_version != scope.quantity_source_version:
+            return False
+        if ticket.source_as_of is None or ticket.source_as_of > scope.quantity_as_of:
+            return False
+        if ticket.purchased_at > ticket.source_as_of:
+            return False
+        if ticket.ticket_reference is None:
+            # 예매번호만으로는 같은 예매의 여러 행을 중복 제거할 수 없습니다.
+            if rows_per_reservation[ticket.key] > 1:
+                return False
+            continue
+        if reservation_of_reference.setdefault(ticket.ticket_reference, ticket.key) != ticket.key:
+            return False
+    return True
+
+
 def purchase_limit_evaluations(request: Track1LimitAnalysisRequest) -> list[Track1PurchaseLimitEvaluation]:
     """제출된 회차 범위마다 v2 계약의 한도 평가 결과를 하나씩 만듭니다.
 
@@ -369,8 +413,7 @@ def purchase_limit_evaluations(request: Track1LimitAnalysisRequest) -> list[Trac
         if policy is None:
             results.append(not_evaluated("POLICY_NOT_CONFIRMED"))
             continue
-        # 스냅샷 기준 시각 이후의 구매는 수량에 반영됐다고 볼 수 없어 한도를 판정하지 않습니다.
-        if not scope.quantity_is_complete or any(ticket.purchased_at > scope.quantity_as_of for ticket in tickets):
+        if not scope.quantity_is_complete or not _quantity_rows_are_trustworthy(scope, tickets):
             results.append(not_evaluated("QUANTITY_DATA_INCOMPLETE"))
             continue
         if not all(policy.applies_at(ticket.purchased_at) for ticket in tickets):
@@ -396,10 +439,8 @@ def purchase_limit_evaluations(request: Track1LimitAnalysisRequest) -> list[Trac
                     maxTicketsPerAccount=finding.max_tickets_per_account,
                     policyVersion=finding.policy_version,
                     reservationQuantities=[
-                        Track1ReservationQuantity(
-                            reservationNo=t.reservation_no, effectiveTicketQuantity=t.effective_ticket_quantity,
-                        )
-                        for t in sorted(by_account[finding.account_key[1]], key=lambda t: t.reservation_no)
+                        Track1ReservationQuantity(reservationNo=reservation, effectiveTicketQuantity=quantity)
+                        for reservation, quantity in sorted(_reservation_totals(by_account[finding.account_key[1]]).items())
                     ],
                 )
                 for finding in findings

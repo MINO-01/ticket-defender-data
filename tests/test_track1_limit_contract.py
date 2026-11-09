@@ -83,7 +83,7 @@ class LimitContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         data = response.json()
         self.assertEqual(set(data), {
-            "requestId", "status", "algorithm", "algorithmVersion", "analyzedAt", "clusters",
+            "requestId", "status", "algorithm", "algorithmVersion", "analyzedAt", "clusters", "sharedSignalObservations",
             "purchaseLimitEvaluations",
         })
         self.assertEqual(data["clusters"], [])

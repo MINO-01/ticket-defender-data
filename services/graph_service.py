@@ -11,6 +11,7 @@ from schemas.dto import (
 from services.track1_scoring import (
     PROJECTION_VERSION, SCORE_VERSION, GraphResultInvalid,
     build_account_token_graph, clusters_from_account_communities, purchase_limit_evaluations,
+    shared_signal_observations,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class GraphService:
     async def analyze_louvain(self, request: Track1AnalysisRequest) -> Track1AnalysisResponse:
         graph_name = f"track1_{uuid.uuid4().hex}"
         graph = build_account_token_graph(request.tickets)
+        observations = shared_signal_observations(request)
         projection_attempted = False
         failure = None
 
@@ -59,6 +61,7 @@ class GraphService:
                         algorithmVersion=algorithm_version,
                         analyzedAt=datetime.now(timezone.utc),
                         clusters=[],
+                        sharedSignalObservations=observations,
                     )
 
                 projection_attempted = True
@@ -104,6 +107,7 @@ class GraphService:
                     algorithmVersion=algorithm_version,
                     analyzedAt=datetime.now(timezone.utc),
                     clusters=clusters,
+                    sharedSignalObservations=observations,
                 )
             except Exception as exc:
                 failure = exc
@@ -132,6 +136,7 @@ class GraphService:
             algorithmVersion=analysis.algorithm_version,
             analyzedAt=analysis.analyzed_at,
             clusters=analysis.clusters,
+            sharedSignalObservations=analysis.shared_signal_observations,
             purchaseLimitEvaluations=purchase_limit_evaluations(request),
         )
 

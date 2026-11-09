@@ -1,0 +1,52 @@
+{
+  "fixture": "track1_shared_signal_scenario.json",
+  "fixtureVersion": "track1-shared-signal-scenario-1",
+  "purpose": "ISOLATED_CONTRACT_AND_GDS_VERIFICATION",
+  "synthetic": true,
+  "finalForImport": false,
+  "requestSha256": "05f918418febbbcc94efa875d022737a959c5da736ece7ae840140a923e2b788",
+  "note": "A3 반입용 원장이 아니며 run960과 무관합니다. 구성과 기대 결과는 분석 결과를 보기 전에 정했습니다. 합성 구조의 동작 확인이며 탐지 효과 검증이 아닙니다.",
+  "knownDeviations": {
+    "R2": "사전 기대는 5계정 한 군집이었으나 격리 Neo4j 5.19.0, GDS 2.6.6의 실제 Louvain은 r2-1~2와 r2-3~5의 2개 커뮤니티로 분할했습니다. 입력과 알고리즘을 조정하지 않고 기록합니다."
+  },
+  "expected": {
+    "clusterAccountGroups": [
+      [
+        "r1-1",
+        "r1-2",
+        "r1-3",
+        "r1-4",
+        "r1-5",
+        "r1-6"
+      ],
+      [
+        "r2-1",
+        "r2-2",
+        "r2-3",
+        "r2-4",
+        "r2-5"
+      ]
+    ],
+    "observations": {
+      "R4": {
+        "distinctAccountCount": 20,
+        "ipNetworkType": "CORPORATE_EDU"
+      },
+      "N2": {
+        "distinctAccountCount": 30,
+        "ipNetworkType": "MOBILE_CGNAT"
+      }
+    },
+    "evaluations": {
+      "22222222-2222-4222-8222-2222222200aa": "EVALUATED",
+      "22222222-2222-4222-8222-2222222200bb": "POLICY_NOT_CONFIRMED",
+      "22222222-2222-4222-8222-2222222200cc": "QUANTITY_DATA_INCOMPLETE"
+    },
+    "limitFindings": [
+      {
+        "accountId": "over",
+        "effectiveTicketQuantity": 3
+      }
+    ]
+  }
+}

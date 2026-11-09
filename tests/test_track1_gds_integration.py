@@ -184,6 +184,33 @@ class Track1GdsIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [(f.account_id, f.effective_ticket_quantity) for f in evaluated.account_limit_findings], [("solo-over", 3)],
         )
 
+    async def test_r4_and_n2_are_observed_without_becoming_clusters(self):
+        """IP만 공유한 대량 계정은 관찰로만 남고 실제 Louvain 군집이 되지 않는지 확인합니다."""
+
+        fixtures = Path(__file__).parent / "fixtures"
+        payload = json.loads((fixtures / "track1_shared_signal_scenario.json").read_text(encoding="utf-8"))
+        manifest = json.loads((fixtures / "track1_shared_signal_scenario.manifest.json").read_text(encoding="utf-8"))
+        response = await self.service.analyze_louvain_with_limits(Track1LimitAnalysisRequest.model_validate(payload))
+
+        groups = [sorted({m.account_id for m in cluster.members}) for cluster in response.clusters]
+        r1, r2 = manifest["expected"]["clusterAccountGroups"]
+        self.assertIn(r1, groups)
+        # 간접 연결은 분할될 수 있습니다(manifest knownDeviations). 다른 패턴과 섞이지 않고 모두 군집에 남는지 확인합니다.
+        r2_groups = [group for group in groups if group != r1]
+        self.assertEqual(sorted(account for group in r2_groups for account in group), r2)
+        members = {m.account_id for cluster in response.clusters for m in cluster.members}
+        self.assertFalse(any(account.startswith(("r4-", "n2-")) for account in members))
+        by_size = {item.distinct_account_count: item for item in response.shared_signal_observations}
+        for name, expected in manifest["expected"]["observations"].items():
+            with self.subTest(name=name):
+                observation = by_size[expected["distinctAccountCount"]]
+                self.assertEqual(observation.ip_network_type, expected["ipNetworkType"])
+                self.assertTrue(observation.excluded_from_louvain)
+                self.assertEqual(observation.ticket_quantity_status, "VERIFIED")
+        self.assertIn("projection-v2.1-account-relative-hub", response.algorithm_version)
+        statuses = {item.performance_id: item.status for item in response.purchase_limit_evaluations}
+        self.assertEqual(statuses, manifest["expected"]["evaluations"])
+
     async def test_concurrent_requests_are_isolated_and_cleaned(self):
         before_graphs = await self.graph_names()
         first = request([

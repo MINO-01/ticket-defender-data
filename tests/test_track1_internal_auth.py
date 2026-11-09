@@ -90,7 +90,7 @@ class Track1InternalAuthTests(unittest.TestCase):
         response = self.client.post(ANALYZE, json=PAYLOAD, headers={"X-TD-Track1-Key": TRACK1_KEY})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(set(response.json()), {
-            "requestId", "status", "algorithm", "algorithmVersion", "analyzedAt", "clusters",
+            "requestId", "status", "algorithm", "algorithmVersion", "analyzedAt", "clusters", "sharedSignalObservations",
         })
         self.assertEqual(response.json()["requestId"], REQUEST_ID)
         self.assertEqual(self.service.calls, ["analyze_louvain"])

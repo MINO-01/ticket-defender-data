@@ -110,6 +110,36 @@ class Track1Cluster(BaseModel):
     risk_score: float = Field(ge=0, le=1, allow_inf_nan=False, alias="riskScore")
 
 
+IpNetworkType = Literal["MOBILE_CGNAT", "RESIDENTIAL", "CORPORATE_EDU", "DATACENTER_PROXY", "UNKNOWN"]
+
+
+class Track1SharedSignalCorroboration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payment_shared_account_count: int = Field(ge=0, alias="paymentSharedAccountCount")
+    device_shared_account_count: int = Field(ge=0, alias="deviceSharedAccountCount")
+
+
+class Track1SharedSignalObservation(BaseModel):
+    """대량 공유 관찰입니다. Louvain 군집이 아니며 부정거래나 동일인 판단이 아닙니다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: str = Field(min_length=1, alias="observationId")
+    scope_type: Literal["EVENT", "PERFORMANCE"] = Field(alias="scopeType")
+    scope_id: str = Field(min_length=1, alias="scopeId")
+    signal_type: Literal["IP", "ADDRESS"] = Field(alias="signalType")
+    distinct_account_count: int = Field(ge=2, alias="distinctAccountCount")
+    scope_account_count: int = Field(ge=2, alias="scopeAccountCount")
+    distinct_reservation_count: int = Field(ge=1, alias="distinctReservationCount")
+    total_ticket_quantity: Optional[int] = Field(ge=1, alias="totalTicketQuantity")
+    ticket_quantity_status: Literal["VERIFIED", "UNAVAILABLE"] = Field(alias="ticketQuantityStatus")
+    corroboration: Track1SharedSignalCorroboration
+    ip_network_type: IpNetworkType = Field(alias="ipNetworkType")
+    purchase_window_seconds: Optional[int] = Field(ge=0, alias="purchaseWindowSeconds")
+    excluded_from_louvain: bool = Field(alias="excludedFromLouvain")
+
+
 class Track1AnalysisResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -119,6 +149,9 @@ class Track1AnalysisResponse(BaseModel):
     algorithm_version: str = Field(min_length=1, alias="algorithmVersion")
     analyzed_at: datetime = Field(alias="analyzedAt")
     clusters: List[Track1Cluster]
+    shared_signal_observations: List[Track1SharedSignalObservation] = Field(
+        default_factory=list, alias="sharedSignalObservations"
+    )
 
 
 # Backend docs/api/track1-purchase-limit-analysis-v2.yaml 계약의 DTO입니다.
@@ -208,6 +241,8 @@ class Track1LimitTicketInput(BaseModel):
     ticket_status: Optional[Literal["ACTIVE", "CANCELLED", "REFUNDED", "UNKNOWN"]] = Field(default=None, alias="ticketStatus")
     source_version: Optional[PolicyVersion] = Field(default=None, alias="sourceVersion")
     source_as_of: Optional[AwareDatetime] = Field(default=None, alias="sourceAsOf")
+    # 호출자가 제공한 메타데이터만 사용하며 IP 토큰에서 추정하지 않습니다.
+    ip_network_type: Optional[IpNetworkType] = Field(default=None, alias="ipNetworkType")
 
     @model_validator(mode="after")
     def validate_ticket(self):

@@ -1,0 +1,64 @@
+{
+  "provider": "gemini",
+  "configuredModel": "gemini-3.1-flash-lite",
+  "realExternalCall": true,
+  "syntheticImagesOnly": true,
+  "budgetExhausted": false,
+  "sdkCalls": 4,
+  "results": [
+    {
+      "image": "listing_A",
+      "imageSha256": "dc73cfc8c5bbfff7ab290081f79c555973e9f7c0f2d4c7650cd6cb5392776dca",
+      "httpStatus": 502,
+      "serverSchemaValidated": false,
+      "latencyMs": 4668,
+      "status": 502,
+      "code": "MODEL_RESPONSE_INVALID",
+      "modelName": null,
+      "fields": null,
+      "humanTruth": {
+        "zone": "19",
+        "row": "8",
+        "seat": "12",
+        "askingPrice": 200000,
+        "targetCandidateResult": "MATCH_CANDIDATE"
+      }
+    },
+    {
+      "image": "listing_B",
+      "imageSha256": "f0cc8648eae5f2d2585a2a8aa7177866826aa7cf180baa0d5906a40d2783778e",
+      "httpStatus": 502,
+      "serverSchemaValidated": false,
+      "latencyMs": 2678,
+      "status": 502,
+      "code": "MODEL_RESPONSE_INVALID",
+      "modelName": null,
+      "fields": null,
+      "humanTruth": {
+        "zone": "21",
+        "row": "20",
+        "seat": "16",
+        "askingPrice": 180000,
+        "targetCandidateResult": "NO_MATCH"
+      }
+    },
+    {
+      "image": "listing_C",
+      "imageSha256": "e3a3b269c846918711ace16b45ed15d53ed2261dfdd267387dc9ec9e0dccd794",
+      "httpStatus": 502,
+      "serverSchemaValidated": false,
+      "latencyMs": 21536,
+      "status": 502,
+      "code": "MODEL_RESPONSE_INVALID",
+      "modelName": null,
+      "fields": null,
+      "humanTruth": {
+        "zone": null,
+        "row": null,
+        "seat": null,
+        "askingPrice": 190000,
+        "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"
+      }
+    }
+  ]
+}

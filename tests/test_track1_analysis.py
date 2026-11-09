@@ -96,7 +96,7 @@ class Track1ContractTests(unittest.TestCase):
         self.assertEqual(body["algorithm"], "LOUVAIN")
         self.assertEqual(body["clusters"], [])
         self.assertEqual(set(body), {
-            "requestId", "status", "algorithm", "algorithmVersion", "analyzedAt", "clusters"
+            "requestId", "status", "algorithm", "algorithmVersion", "analyzedAt", "clusters", "sharedSignalObservations",
         })
         self.assertEqual(self.client.post(
             "/api/v1/clusters/macro",

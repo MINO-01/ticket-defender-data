@@ -1,0 +1,131 @@
+{
+  "provider": "gemini",
+  "configuredModel": "gemini-3.1-flash-lite",
+  "realExternalCall": true,
+  "syntheticImagesOnly": true,
+  "budgetExhausted": false,
+  "sdkCalls": 3,
+  "results": [
+    {
+      "image": "listing_A",
+      "imageSha256": "1cb9bf942c48404dd76439dfb27ad050757d8b5c423d4bd82c2ae0241a009405",
+      "httpStatus": 502,
+      "serverSchemaValidated": false,
+      "latencyMs": 3881,
+      "status": 502,
+      "code": "MODEL_RESPONSE_INVALID",
+      "modelName": null,
+      "fields": null,
+      "humanTruth": {
+        "zone": "19",
+        "row": "8",
+        "seat": "12",
+        "askingPrice": 200000,
+        "targetCandidateResult": "MATCH_CANDIDATE"
+      }
+    },
+    {
+      "image": "listing_B",
+      "imageSha256": "a93e55c294755100514e2c2462bcfeb5c9cc5f5e165f4ca340e4be2e13e9380c",
+      "httpStatus": 502,
+      "serverSchemaValidated": false,
+      "latencyMs": 2514,
+      "status": 502,
+      "code": "MODEL_RESPONSE_INVALID",
+      "modelName": null,
+      "fields": null,
+      "humanTruth": {
+        "zone": "21",
+        "row": "20",
+        "seat": "16",
+        "askingPrice": 180000,
+        "targetCandidateResult": "NO_MATCH"
+      }
+    },
+    {
+      "image": "listing_C",
+      "imageSha256": "b287190afba26e851cf4ea990625e410e332b71d940b9adb123bd6f114fe6ade",
+      "httpStatus": 200,
+      "serverSchemaValidated": true,
+      "latencyMs": 2927,
+      "status": "COMPLETED",
+      "code": null,
+      "modelName": "gemini-3.1-flash-lite",
+      "fields": {
+        "eventName": {
+          "state": "FOUND",
+          "value": "악동뮤지션 대전 콘서트 (합성 시연)",
+          "evidenceQuote": "악동뮤지션 대전 콘서트 (합성 시연)",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "performanceAt": {
+          "state": "FOUND",
+          "value": "2026년 12월 5일 18:00",
+          "evidenceQuote": "2026년 12월 5일 18:00",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "platformDisplayName": {
+          "state": "FOUND",
+          "value": "합성중고장터",
+          "evidenceQuote": "합성중고장터",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "askingPrice": {
+          "state": "FOUND",
+          "value": {
+            "raw": "190,000",
+            "amount": "190000.00"
+          },
+          "evidenceQuote": "190,000원",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "currency": {
+          "state": "FOUND",
+          "value": "KRW",
+          "evidenceQuote": "190,000원",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "saleText": {
+          "state": "FOUND",
+          "value": "좌석 정보는 가렸으니 문의해 주세요.",
+          "evidenceQuote": "좌석 정보는 가렸으니 문의해 주세요.",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "zone": {
+          "state": "UNKNOWN",
+          "value": null,
+          "evidenceQuote": null,
+          "unknownReason": "ABSENT",
+          "candidates": []
+        },
+        "row": {
+          "state": "UNKNOWN",
+          "value": null,
+          "evidenceQuote": null,
+          "unknownReason": "ABSENT",
+          "candidates": []
+        },
+        "seat": {
+          "state": "UNKNOWN",
+          "value": null,
+          "evidenceQuote": null,
+          "unknownReason": "ABSENT",
+          "candidates": []
+        }
+      },
+      "humanTruth": {
+        "zone": null,
+        "row": null,
+        "seat": null,
+        "askingPrice": 190000,
+        "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"
+      }
+    }
+  ]
+}

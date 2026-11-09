@@ -50,6 +50,12 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 - 정책과 범위 외의 스키마 오류 코드가 `ContractError`에 없어 기존 `{"detail": [{"code": ...}]}` 형식을 유지했다.
 - 같은 `eventId` 안에서 `(accountId, reservationNo, eventId)`는 응답 `members` 식별자이므로 요청 전체에서 중복을 거부한다.
 
+### R4, N2 대량 공유 관찰 격리 검증 (2026-11-10, Neo4j 5.19.0, GDS 2.6.6)
+
+수정 전 코드는 허브를 그래프에서 제외한 뒤 응답에 남기지 않아 R4(조직 IP 20계정)와 N2(CGNAT 30계정)가 모두 사라졌다. 수정 후 두 패턴은 `sharedSignalObservations`에 별도로 나타나고 실제 Louvain 군집에는 들어가지 않는다. 계약은 `docs/api/shared-signal-observations-v1.md`다.
+
+R1 6계정은 한 군집이 됐다. **R2 5계정 사슬은 사전 기대(한 군집)와 달리 r2-1~2, r2-3~5의 두 커뮤니티로 분할됐다.** 다른 패턴과 섞이지는 않았다. 위 S3~S5에서 본 간접 연결 분할과 같은 약점이며 입력, 알고리즘, 점수를 조정하지 않았다. 합성 구조의 동작 확인이며 탐지 효과 검증이 아니다.
+
 ### 합성 시나리오 격리 검증 (2026-11-09, Neo4j 5.19.0, GDS 2.6.6)
 
 `tests/fixtures/track1_v2_demo_scenario.json`과 manifest는 계약 검증 전용 합성 입력이며 A3 반입 원장이 아니다(`finalForImport: false`). 실제 `gds.louvain.stream`에서 결제와 기기를 공유한 4계정만 군집이 됐고, 공용 IP 허브 10계정과 단독 계정은 군집이 아니었다. 다좌석 3매 계정만 한도 초과 신호이며, 정책 미확인 회차와 수량 불완전 회차는 각각 `POLICY_NOT_CONFIRMED`, `QUANTITY_DATA_INCOMPLETE`로 남았다. 합성 구조의 동작 확인이며 탐지 성능 수치가 아니다.

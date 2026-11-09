@@ -16,10 +16,11 @@ from typing import Iterable, Mapping, Protocol, Sequence
 from schemas.dto import (
     Track1AccountLimitFinding, Track1AnalysisRequest, Track1Cluster, Track1ClusterMember,
     Track1LimitAnalysisRequest, Track1PurchaseLimitEvaluation, Track1ReservationQuantity,
+    Track1SharedSignalCorroboration, Track1SharedSignalObservation,
 )
 
 
-PROJECTION_VERSION = "projection-v2-account"
+PROJECTION_VERSION = "projection-v2.1-account-relative-hub"
 SCORE_VERSION = "score-v2-exp1"
 
 SIGNALS = ("payment_hash", "device_id_hash", "address_hash", "ip_hash")
@@ -55,10 +56,12 @@ class ScoreParameters:
     signal_weights: Mapping[str, float] = field(default_factory=lambda: {
         "payment_hash": 0.45, "device_id_hash": 0.40, "address_hash": 0.15, "ip_hash": 0.05,
     })
-    # 이 계정 수를 초과하면 허브입니다. 지정되지 않은 신호는 허브 판정을 하지 않습니다.
+    # 이 계정 수를 초과하면 허브 후보입니다. 지정되지 않은 신호는 허브 판정을 하지 않습니다.
     hub_account_limits: Mapping[str, int] = field(default_factory=lambda: {
         "ip_hash": 8, "address_hash": 6,
     })
+    # 큰 회차에서는 전체 계정 수의 이 비율까지 허브로 보지 않습니다. 기준은 max(최소 계정 수, ceil(전체 x 비율))입니다.
+    hub_relative_percent: int = 1
     size_saturation_accounts: int = 5
     size_base: float = 0.75
     single_signal_type_factor: float = 0.8
@@ -132,9 +135,22 @@ def token_account_index(accounts: Mapping[AccountKey, AccountAggregate]) -> dict
     return index
 
 
-def is_hub(signal: str, distinct_accounts: int, parameters: ScoreParameters = DEFAULT_PARAMETERS) -> bool:
+def hub_minimum_accounts(signal: str, parameters: ScoreParameters = DEFAULT_PARAMETERS) -> int | None:
     limit = parameters.hub_account_limits.get(signal)
-    return limit is not None and distinct_accounts > limit
+    return None if limit is None else limit + 1
+
+
+def is_hub(
+    signal: str, distinct_accounts: int, parameters: ScoreParameters = DEFAULT_PARAMETERS, scope_accounts: int = 0
+) -> bool:
+    """구별 계정 수가 max(최소 계정 수, ceil(분석 범위 계정 수 x 비율)) 이상이면 허브입니다."""
+
+    minimum = hub_minimum_accounts(signal, parameters)
+    if minimum is None:
+        return False
+    # 부동소수점 오차 없이 올림합니다.
+    relative = -(-scope_accounts * parameters.hub_relative_percent // 100)
+    return distinct_accounts >= max(minimum, relative)
 
 
 def build_account_token_graph(
@@ -148,7 +164,8 @@ def build_account_token_graph(
     accounts = aggregate_accounts(tickets)
     index = token_account_index(accounts)
     shared = sorted(key for key, owners in index.items() if len(owners) >= 2)
-    excluded = tuple(key for key in shared if is_hub(key[1], len(index[key]), parameters))
+    scope_accounts = Counter(key[0] for key in accounts)
+    excluded = tuple(key for key in shared if is_hub(key[1], len(index[key]), parameters, scope_accounts[key[0]]))
     projected = [key for key in shared if key not in set(excluded)]
     connected = sorted({owner for key in projected for owner in index[key]})
     account_index = {key: position for position, key in enumerate(connected)}
@@ -380,6 +397,79 @@ def _quantity_rows_are_trustworthy(scope, tickets) -> bool:
         if reservation_of_reference.setdefault(ticket.ticket_reference, ticket.key) != ticket.key:
             return False
     return True
+
+
+_OBSERVED_SIGNALS = {"ip_hash": "IP", "address_hash": "ADDRESS"}
+
+
+def _shared_account_count(owners: Iterable[AccountAggregate], signal: str) -> int:
+    """대량 공유 계정 중 같은 결제 또는 기기 토큰을 다른 계정과 함께 쓴 계정 수입니다."""
+
+    owners = list(owners)
+    usage = Counter(token for owner in owners for token in owner.tokens[signal])
+    return sum(1 for owner in owners if any(usage[token] >= 2 for token in owner.tokens[signal]))
+
+
+def shared_signal_observations(
+    request, parameters: ScoreParameters = DEFAULT_PARAMETERS
+) -> list[Track1SharedSignalObservation]:
+    """최소 계정 수 이상이 공유한 IP와 주소를 군집과 별도로 돌려줍니다.
+
+    허브로 그래프에서 제외돼도 관찰은 남깁니다. 토큰 값은 응답에 넣지 않으며 네트워크 유형은 추정하지 않습니다.
+    수량과 구매시각은 회차의 출처가 확인된 경우에만 제공합니다.
+    """
+
+    accounts = aggregate_accounts(request.tickets)
+    index = token_account_index(accounts)
+    scope_accounts = Counter(key[0] for key in accounts)
+    tickets_by_scope: dict[str, list] = defaultdict(list)
+    tickets_by_token: dict[TokenKey, list] = defaultdict(list)
+    for ticket in request.tickets:
+        tickets_by_scope[ticket.analysis_scope].append(ticket)
+        for signal in _OBSERVED_SIGNALS:
+            token = getattr(ticket, signal)
+            if token is not None:
+                tickets_by_token[(ticket.analysis_scope, signal, token)].append(ticket)
+
+    performance_scopes = getattr(request, "performance_scopes", None)
+    scopes = {scope.performance_id.lower(): scope for scope in performance_scopes or ()}
+    verified_scopes = {
+        key for key, scope in scopes.items()
+        if scope.quantity_is_complete and _quantity_rows_are_trustworthy(scope, tickets_by_scope[key])
+    }
+
+    observations = []
+    for key in sorted(tickets_by_token):
+        scope_key, signal, token = key
+        minimum = hub_minimum_accounts(signal, parameters)
+        owner_keys = index[key]
+        if minimum is None or len(owner_keys) < minimum:
+            continue
+        owners = [accounts[owner] for owner in sorted(owner_keys)]
+        rows = tickets_by_token[key]
+        verified = scope_key in verified_scopes
+        times = [ticket.purchased_at for ticket in rows] if verified else []
+        networks = {getattr(ticket, "ip_network_type", None) for ticket in rows} if signal == "ip_hash" else {None}
+        identity = json.dumps([str(request.request_id), scope_key, signal, token], separators=(",", ":"))
+        observations.append(Track1SharedSignalObservation(
+            observationId="obs-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32],
+            scopeType="PERFORMANCE" if performance_scopes is not None else "EVENT",
+            scopeId=scope_key,
+            signalType=_OBSERVED_SIGNALS[signal],
+            distinctAccountCount=len(owners),
+            scopeAccountCount=scope_accounts[scope_key],
+            distinctReservationCount=len({ticket.key for ticket in rows}),
+            totalTicketQuantity=sum(ticket.effective_ticket_quantity for ticket in rows) if verified else None,
+            ticketQuantityStatus="VERIFIED" if verified else "UNAVAILABLE",
+            corroboration=Track1SharedSignalCorroboration(
+                paymentSharedAccountCount=_shared_account_count(owners, "payment_hash"),
+                deviceSharedAccountCount=_shared_account_count(owners, "device_id_hash"),
+            ),
+            ipNetworkType=next(iter(networks)) if len(networks) == 1 and None not in networks else "UNKNOWN",
+            purchaseWindowSeconds=int((max(times) - min(times)).total_seconds()) if times else None,
+            excludedFromLouvain=is_hub(signal, len(owners), parameters, scope_accounts[scope_key]),
+        ))
+    return observations
 
 
 def purchase_limit_evaluations(request: Track1LimitAnalysisRequest) -> list[Track1PurchaseLimitEvaluation]:

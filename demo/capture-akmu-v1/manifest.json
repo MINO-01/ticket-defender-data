@@ -1,0 +1,88 @@
+{
+  "fixtureVersion": "akmu-capture-demo-v1",
+  "synthetic": true,
+  "finalForImport": false,
+  "purpose": "격리 합성 환경의 촬영용 자료입니다. run960과 무관하며 실제 인물, 판매글, 개인정보가 없습니다.",
+  "generator": "scripts/generate_capture_demo.py",
+  "font": "malgun.ttf (Windows 시스템 글꼴, 저장소 미포함)",
+  "import": {
+    "sourceVersion": "akmu-demo-ledger-v1",
+    "sourceAsOf": "2026-11-08T10:00:00Z",
+    "quantityBasis": "SYNTHETIC_PROVIDER_TICKET_LEDGER",
+    "completeSnapshot": true,
+    "inputType": "INDIVIDUAL_TICKET",
+    "reservationSourceVersion": "akmu-demo-reservations-v1"
+  },
+  "performance": {
+    "eventName": "악동뮤지션 대전 콘서트 (합성 시연)",
+    "performanceText": "2026년 12월 5일 18:00",
+    "performanceAt": "2026-12-05T18:00:00+09:00",
+    "venue": "대전 공연장 (가상)",
+    "zones": [
+      "19",
+      "20",
+      "21"
+    ],
+    "performanceRef": "AKMU-DAEJEON-20261205-1800"
+  },
+  "policyToRegister": {
+    "maxTicketsPerAccount": 2,
+    "policyVersion": "akmu-demo-policy-r1",
+    "effectiveFrom": "2026-11-01T00:00:00",
+    "limitSubject": "ACCOUNT",
+    "applicationScope": "PERFORMANCE",
+    "cancellationRefundRule": "NETTED",
+    "includesPresale": false
+  },
+  "rowCounts": {
+    "quantityLedger": 67,
+    "reservationSnapshot": 67
+  },
+  "linkedCase": {
+    "reservationReference": "akmu-r2-res-3",
+    "account": "akmu-r2-3",
+    "seat": {
+      "zone": "19",
+      "row": "8",
+      "seat": "12"
+    }
+  },
+  "humanTruth": {
+    "listing_A": {
+      "zone": "19",
+      "row": "8",
+      "seat": "12",
+      "askingPrice": 200000,
+      "displayPrice": "200,000원 (KRW)",
+      "currency": "KRW",
+      "targetCandidateResult": "MATCH_CANDIDATE"
+    },
+    "listing_B": {
+      "zone": "21",
+      "row": "20",
+      "seat": "16",
+      "askingPrice": 180000,
+      "targetCandidateResult": "NO_MATCH"
+    },
+    "listing_C": {
+      "zone": null,
+      "row": null,
+      "seat": null,
+      "askingPrice": 190000,
+      "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"
+    }
+  },
+  "notes": [
+    "targetCandidateResult는 목표이며 결과가 아닙니다. 실제 결과는 모델과 Backend가 결정합니다.",
+    "고정 960석 원장의 19구역 8열 12번은 R2 패턴이 아니어서 그 원장을 쓰지 않고 이 시연 전용 원장을 별도로 고정했습니다.",
+    "R2는 실측에서 2개 커뮤니티로 분할되었습니다. akmu-r2-3이 속한 군집을 Case 3에 사용합니다.",
+    "Backend 수량 원장에는 네트워크 유형 입력이 없어 R4, N2의 ipNetworkType은 화면에서 미확인으로 표시됩니다."
+  ],
+  "files": {
+    "quantity_ledger.csv": "ced00276c9afd3dde87951e322ed8f1f8772d6a1fc0e6d518ba1dc9748c03889",
+    "reservation_snapshot.csv": "8b6b97d47cc9df7058920d1dff177c6f0ae7d695a878126328ba4a0c6ed38334",
+    "images/listing_A.png": "35b22f6d95fbbbee6d5a7646e919e7535013bee174a55dbff665c053afd0b54b",
+    "images/listing_B.png": "a93e55c294755100514e2c2462bcfeb5c9cc5f5e165f4ca340e4be2e13e9380c",
+    "images/listing_C.png": "b287190afba26e851cf4ea990625e410e332b71d940b9adb123bd6f114fe6ade"
+  }
+}

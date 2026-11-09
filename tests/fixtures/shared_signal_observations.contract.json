@@ -1,0 +1,56 @@
+[
+ {
+  "observationId": "obs-334627af6dbc9fe98036ccf45ad67d3b",
+  "scopeType": "PERFORMANCE",
+  "scopeId": "22222222-2222-4222-8222-2222222200aa",
+  "signalType": "IP",
+  "distinctAccountCount": 20,
+  "scopeAccountCount": 64,
+  "distinctReservationCount": 20,
+  "totalTicketQuantity": 20,
+  "ticketQuantityStatus": "VERIFIED",
+  "corroboration": {
+   "paymentSharedAccountCount": 0,
+   "deviceSharedAccountCount": 0
+  },
+  "ipNetworkType": "CORPORATE_EDU",
+  "purchaseWindowSeconds": 19,
+  "excludedFromLouvain": true
+ },
+ {
+  "observationId": "obs-5a4838277653f271303d4c0c89b0dfc8",
+  "scopeType": "PERFORMANCE",
+  "scopeId": "22222222-2222-4222-8222-2222222200aa",
+  "signalType": "IP",
+  "distinctAccountCount": 30,
+  "scopeAccountCount": 64,
+  "distinctReservationCount": 30,
+  "totalTicketQuantity": 30,
+  "ticketQuantityStatus": "VERIFIED",
+  "corroboration": {
+   "paymentSharedAccountCount": 0,
+   "deviceSharedAccountCount": 0
+  },
+  "ipNetworkType": "MOBILE_CGNAT",
+  "purchaseWindowSeconds": 5220,
+  "excludedFromLouvain": true
+ },
+ {
+  "observationId": "obs-139bef10d2fc3c4db0ff6f20454bdaab",
+  "scopeType": "PERFORMANCE",
+  "scopeId": "22222222-2222-4222-8222-2222222200cc",
+  "signalType": "IP",
+  "distinctAccountCount": 9,
+  "scopeAccountCount": 9,
+  "distinctReservationCount": 9,
+  "totalTicketQuantity": null,
+  "ticketQuantityStatus": "UNAVAILABLE",
+  "corroboration": {
+   "paymentSharedAccountCount": 0,
+   "deviceSharedAccountCount": 0
+  },
+  "ipNetworkType": "UNKNOWN",
+  "purchaseWindowSeconds": null,
+  "excludedFromLouvain": true
+ }
+]

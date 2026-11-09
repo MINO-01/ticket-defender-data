@@ -14,7 +14,10 @@ from .models import BaselineOutput, EvaluationRecord
 
 
 _ISOLATED_PROJECT_PATTERN = re.compile(r"^tdissue19gds[0-9a-f]{10}$")
-_EXPECTED_GDS_JAR = "td-issue19-gds-2.6.6.jar"
+# 공식 배포물 이름입니다. 진위는 이름이 아니라 실행 스크립트의 SHA-256 확인으로 판단합니다.
+_EXPECTED_GDS_JAR = "neo4j-graph-data-science-2.6.6.jar"
+_EXPECTED_NEO4J_IMAGE = "neo4j:5.19.0"
+B3_LEGACY_V1_NAME = "B3_GDS_LOUVAIN_LEGACY_SCORE_V1"
 
 
 def _docker_output(arguments: list[str]) -> str | None:
@@ -83,7 +86,7 @@ def verify_isolated_gds_target(uri: str) -> str | None:
         if (
             labels.get("com.docker.compose.service") != "neo4j"
             or not _ISOLATED_PROJECT_PATTERN.fullmatch(project)
-            or container.get("Config", {}).get("Image") != "neo4j:5.12.0"
+            or container.get("Config", {}).get("Image") != _EXPECTED_NEO4J_IMAGE
             or not _has_expected_read_only_jar_mount(container)
         ):
             continue
@@ -141,6 +144,70 @@ async def _run_existing_louvain(
         cluster_labels=labels,
         algorithm_version=response.algorithm_version,
     )
+
+
+def _request_from_records(eligible: list[EvaluationRecord]):
+    from schemas.dto import Track1AnalysisRequest
+
+    return Track1AnalysisRequest.model_validate({
+        "requestId": str(uuid4()),
+        "tickets": [
+            {
+                "accountId": record.account_id,
+                "reservationNo": record.reservation_no,
+                "eventId": record.event_id,
+                "paymentHash": record.signals.get("payment_hash"),
+                "addressHash": record.signals.get("address_hash"),
+                "deviceIdHash": record.signals.get("device_id_hash"),
+                "ipHash": record.signals.get("ip_hash"),
+            }
+            for record in eligible
+        ],
+    })
+
+
+async def _run_legacy_v1_louvain(
+    records: tuple[EvaluationRecord, ...], uri: str, password: str
+) -> BaselineOutput:
+    """평가 전용 score-v1 경로입니다. 같은 입력과 같은 GDS로 비교합니다."""
+
+    from evaluation.track1.legacy_score_v1 import analyze_louvain_v1
+    from services.graph_service import GraphService
+
+    scores = {record.ticket_id: 0.0 for record in records}
+    labels = {record.ticket_id: f"singleton-{record.ticket_id}" for record in records}
+    eligible = [record for record in records if record.has_signal]
+    if not eligible:
+        return BaselineOutput(B3_LEGACY_V1_NAME, "COMPLETED", scores, labels, "No records had observable signals.")
+    service = GraphService(uri, "neo4j", password)
+    try:
+        response = await analyze_louvain_v1(service.driver, _request_from_records(eligible))
+    finally:
+        await service.close()
+    by_key = {record.key: record.ticket_id for record in records}
+    for cluster in response.clusters:
+        for member in cluster.members:
+            ticket_id = by_key[(member.account_id, member.reservation_no, member.event_id)]
+            scores[ticket_id] = max(scores[ticket_id], cluster.risk_score)
+            labels[ticket_id] = cluster.cluster_id
+    return BaselineOutput(B3_LEGACY_V1_NAME, "COMPLETED", scores, labels, algorithm_version=response.algorithm_version)
+
+
+def b3_legacy_v1_gds_louvain(
+    records: tuple[EvaluationRecord, ...], *, uri: str | None, password: str | None
+) -> BaselineOutput:
+    """B3와 같은 격리 조건에서 score-v1 기준선을 실행합니다."""
+
+    zero = {record.ticket_id: 0.0 for record in records}
+    if not uri or not password:
+        return BaselineOutput(B3_LEGACY_V1_NAME, "SKIPPED_GDS_ISOLATION", zero, detail="Set an isolated GDS URI and password to run B3.")
+    isolation_failure = verify_isolated_gds_target(uri)
+    if isolation_failure is not None:
+        return BaselineOutput(B3_LEGACY_V1_NAME, "SKIPPED_GDS_ISOLATION", zero, detail=f"GDS isolation verification failed: {isolation_failure}")
+    try:
+        return asyncio.run(_run_legacy_v1_louvain(records, uri, password))
+    except Exception as error:
+        return BaselineOutput(B3_LEGACY_V1_NAME, "FAILED", zero, detail=f"{type(error).__name__}: GDS Louvain evaluation failed")
 
 
 def b3_existing_gds_louvain(

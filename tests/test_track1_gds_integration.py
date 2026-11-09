@@ -98,7 +98,7 @@ class Track1GdsIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_versions_and_gds_operations(self):
         dbms = await self.query("CALL dbms.components() YIELD versions RETURN versions")
         gds = await self.query("RETURN gds.version() AS version")
-        self.assertIn("5.12.0", dbms[0]["versions"])
+        self.assertIn("5.19.0", dbms[0]["versions"])
         self.assertEqual(gds[0]["version"], "2.6.6")
 
         procedures = await self.query(
@@ -118,8 +118,11 @@ class Track1GdsIntegrationTests(unittest.IsolatedAsyncioTestCase):
         before_graphs = await self.graph_names()
         before_store = await self.store_counts()
         tickets = [
-            ticket("shared-account", "pay-1", "event-1", "paymentHash", "a"),
-            ticket("shared-account", "pay-2", "event-1", "paymentHash", "a"),
+            ticket("pay-account-1", "pay-1", "event-1", "paymentHash", "a"),
+            ticket("pay-account-2", "pay-2", "event-1", "paymentHash", "a"),
+            # 계정 하나의 자기 공유는 다계정 군집이 되면 안 됩니다.
+            ticket("solo-account", "solo-1", "event-1", "deviceIdHash", "f"),
+            ticket("solo-account", "solo-2", "event-1", "deviceIdHash", "f"),
             ticket("dev-1", "dev-1", "event-1", "deviceIdHash", "b"),
             ticket("dev-2", "dev-2", "event-1", "deviceIdHash", "b"),
             ticket("addr-1", "addr-1", "event-1", "addressHash", "c"),

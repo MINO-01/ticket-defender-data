@@ -26,7 +26,22 @@
 - HMAC 토큰은 `evaluation.track1.tokens`의 비운영 평가 도메인 키로 tenant 범위와 신호 종류별로 만든다. 운영 키가 아니다.
 - 생성기는 군집이나 점수를 만들지 않는다. 분석은 기존 Spring, FastAPI, Neo4j GDS Louvain 경로에서 요청별 임시 투영으로만 수행한다. 영구 Neo4j 적재를 추가하지 않는다.
 - `answer_key.json`의 R1~R3, N1~N3는 주입한 관계 패턴과 평가용 정답이다. Backend나 Frontend로 전달하지 않고, 분석 결과와 분리해 보관한다.
-- GraphService는 예매 단위 그래프를 쓰므로, 관계 패턴이 아닌 정상 계정의 연속 좌석 예매도 작은 커뮤니티로 나올 수 있다. 이를 없애려고 입력을 조정하지 않는다.
+- GraphService는 Issue #30부터 계정 단위 그래프를 쓴다. 예매 단위로 분석하던 score-v1에서는 정상 계정의 연속 좌석 예매가 작은 커뮤니티로 나왔으며, 이 동작은 평가 전용 `legacy_score_v1`에만 남아 있다.
+
+## 계정당 2매 합성 원장 v2
+
+`ledger_v2.py`는 고정된 v1 생성기 해시를 건드리지 않도록 `ledger.py`를 수정하지 않고 재사용한다. 960석, 19~21구역, 계정당 최대 2매, sourceVersion `capstone-demo-ledger-v2-seed<seed>`이며 1행은 유효 티켓 1매라는 합성 전제를 따른다. N3는 `POLICY_AMBIGUOUS_REVIEW`로 분류한다. 3매 이상 사례는 원장과 예매참조가 겹치지 않는 `quantity_rule_fixture.json`에 분리한다.
+
+```powershell
+python -B -m evaluation.capstone_demo generate-v2 --output-dir <저장소 외부 새 경로> --performance-id <확정된 A3 공연 UUID> --event-ref <공연 외부 참조>
+python -B -m evaluation.capstone_demo verify-v2 --ledger-dir <저장소 외부 경로>
+```
+
+`--performance-id` 없이는 고정을 거부한다. `--allow-unconfirmed-performance`는 시험용이며 manifest에 `finalForImport: false`로 남는다. 기존 v1 디렉터리는 수정하지 않는다.
+
+### v1 고정 원장의 생성기 해시 불일치
+
+v1 원장(`capstone-demo-ledger-v1`)의 `verify`는 파일 해시와 seed 재현은 통과하지만 `generatorCodeUnchanged`가 FAIL이다. manifest의 `codeSha256`(`559f7989...`)은 커밋 `067ec4c`의 생성기 코드이고, 고정 뒤 커밋 `65a04ca`가 공연 참조 입력 검증을 추가해 main의 코드 해시가 `c92caa9b...`로 바뀌었다. 출력 바이트는 재현되므로 데이터 변경은 아니다. manifest를 고쳐 맞추지 않으며, 최종 공연 UUID가 정해지면 현재 커밋에서 새 디렉터리에 고정한다.
 
 ## 실제 캡처 평가 절차
 

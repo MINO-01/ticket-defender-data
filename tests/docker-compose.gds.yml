@@ -1,6 +1,6 @@
 services:
   neo4j:
-    image: neo4j:5.12.0
+    image: neo4j:5.19.0
     environment:
       NEO4J_AUTH: neo4j/${TD_GDS_TEST_PASSWORD:?}
       NEO4J_dbms_security_procedures_unrestricted: gds.*

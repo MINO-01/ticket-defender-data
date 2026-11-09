@@ -12,6 +12,7 @@ from core.dependencies import get_graph_service, get_vlm_service
 from main import app
 from schemas.dto import Track1AnalysisRequest, Track1AnalysisResponse, Track1Cluster, Track1ClusterMember
 from services.graph_service import GraphAnalysisUnavailable, GraphResultInvalid, GraphService
+from services.track1_scoring import build_account_token_graph
 
 
 REQUEST_ID = "2136558c-2326-4430-a46d-0793494e9b49"
@@ -217,9 +218,11 @@ class FakeResult:
 
 
 class FakeSession:
-    def __init__(self, rows=None, fail_louvain=False):
+    def __init__(self, rows=None, fail_louvain=False, version="2.6.6", node_count_delta=0):
         self.rows = rows or []
         self.fail_louvain = fail_louvain
+        self.version = version
+        self.node_count_delta = node_count_delta
         self.queries = []
         self.edges = None
 
@@ -232,12 +235,12 @@ class FakeSession:
     async def run(self, query, **parameters):
         self.queries.append(query)
         if "RETURN gds.version()" in query:
-            return FakeResult(record={"version": "2.6.6"})
+            return FakeResult(record={"version": self.version})
         if "gds.graph.project(" in query:
             self.edges = parameters["edges"]
             nodes = {edge["source"] for edge in self.edges}
             nodes.update(edge["target"] for edge in self.edges)
-            return FakeResult(record={"nodeCount": len(nodes)})
+            return FakeResult(record={"nodeCount": len(nodes) + self.node_count_delta})
         if "gds.louvain.stream" in query:
             if self.fail_louvain:
                 raise RuntimeError("synthetic GDS failure")
@@ -267,12 +270,12 @@ class GraphServiceTests(unittest.IsolatedAsyncioTestCase):
             ticket(3, paymentHash=PAYMENT_B), ticket(4, paymentHash=PAYMENT_B),
         ]))
         session = FakeSession(rows=[
-            {"ticketIndex": 0, "communityId": 10},
-            {"ticketIndex": 1, "communityId": 10},
-            {"ticketIndex": 2, "communityId": 20},
-            {"ticketIndex": 3, "communityId": 20},
-            {"ticketIndex": -1, "communityId": 10},
-            {"ticketIndex": -1, "communityId": 20},
+            {"accountIndex": 0, "communityId": 10},
+            {"accountIndex": 1, "communityId": 10},
+            {"accountIndex": 2, "communityId": 20},
+            {"accountIndex": 3, "communityId": 20},
+            {"accountIndex": -1, "communityId": 10},
+            {"accountIndex": -1, "communityId": 20},
         ])
         response = await self.service(session).analyze_louvain(request)
         self.assertEqual(response.request_id, REQUEST_ID)
@@ -290,27 +293,58 @@ class GraphServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("gds.louvain.stream" in query for query in session.queries))
         self.assertTrue(any("gds.graph.drop" in query for query in session.queries))
 
+    async def test_single_account_two_tickets_is_not_multi_account_cluster(self):
+        """한 계정의 2매가 같은 토큰을 써도 다계정 군집이 되면 안 되는 회귀 사례입니다."""
+        request = Track1AnalysisRequest.model_validate(payload([
+            ticket(1, accountId="solo", deviceIdHash=DEVICE_A),
+            ticket(2, accountId="solo", deviceIdHash=DEVICE_A),
+        ]))
+        session = FakeSession(rows=[
+            {"accountIndex": 0, "communityId": 7},
+            {"accountIndex": 1, "communityId": 7},
+            {"accountIndex": -1, "communityId": 7},
+        ])
+        response = await self.service(session).analyze_louvain(request)
+        self.assertEqual(response.status, "COMPLETED")
+        self.assertEqual(response.clusters, [])
+        self.assertIn("score-v2", response.algorithm_version)
+        self.assertFalse(any("gds.graph.project(" in query for query in session.queries))
+
+    async def test_no_relation_still_requires_available_gds(self):
+        """관계 없는 입력도 GDS 장애를 정상 0개로 바꾸면 안 됩니다."""
+        request = Track1AnalysisRequest.model_validate(payload([
+            ticket(1, paymentHash=PAYMENT_A), ticket(2, paymentHash=PAYMENT_B),
+        ]))
+        session = FakeSession(version=None)
+        with self.assertRaises(GraphAnalysisUnavailable):
+            await self.service(session).analyze_louvain(request)
+
     async def test_signal_types_do_not_share_token_nodes(self):
         request = Track1AnalysisRequest.model_validate(payload([
             ticket(1, paymentHash=PAYMENT_A),
             ticket(2, paymentHash=None, ipHash=PAYMENT_A),
         ]))
-        edges = GraphService._louvain_edges(request)
-        self.assertNotEqual(edges[0]["target"], edges[1]["target"])
+        self.assertEqual(build_account_token_graph(request.tickets).edges, ())
 
     async def test_different_events_do_not_share_token_nodes(self):
         request = Track1AnalysisRequest.model_validate(payload([
             ticket(1, eventId="event-1"),
             ticket(2, eventId="event-2"),
         ]))
-        edges = GraphService._louvain_edges(request)
-        self.assertNotEqual(edges[0]["target"], edges[1]["target"])
+        self.assertEqual(build_account_token_graph(request.tickets).edges, ())
+
+    async def test_projection_node_count_mismatch_is_rejected(self):
+        request = Track1AnalysisRequest.model_validate(payload())
+        session = FakeSession(node_count_delta=-1)
+        with self.assertRaises(GraphResultInvalid):
+            await self.service(session).analyze_louvain(request)
+        self.assertTrue(any("gds.graph.drop" in query for query in session.queries))
 
     async def test_invalid_louvain_members_are_rejected(self):
         request = Track1AnalysisRequest.model_validate(payload())
         for rows in (
-            [{"ticketIndex": 0, "communityId": 1}],
-            [{"ticketIndex": 0, "communityId": 1}, {"ticketIndex": 2, "communityId": 1}],
+            [{"accountIndex": 0, "communityId": 1}],
+            [{"accountIndex": 0, "communityId": 1}, {"accountIndex": 2, "communityId": 1}],
         ):
             with self.subTest(rows=rows):
                 session = FakeSession(rows=rows)
@@ -321,27 +355,27 @@ class GraphServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_gds_numeric_node_property_is_mapped_exactly(self):
         request = Track1AnalysisRequest.model_validate(payload())
         session = FakeSession(rows=[
-            {"ticketIndex": 0.0, "communityId": 1},
-            {"ticketIndex": 1.0, "communityId": 1},
-            {"ticketIndex": -1.0, "communityId": 1},
+            {"accountIndex": 0.0, "communityId": 1},
+            {"accountIndex": 1.0, "communityId": 1},
+            {"accountIndex": -1.0, "communityId": 1},
         ])
         result = await self.service(session).analyze_louvain(request)
         self.assertEqual(len(result.clusters), 1)
 
         session = FakeSession(rows=[
-            {"ticketIndex": 0.5, "communityId": 1},
-            {"ticketIndex": 1.0, "communityId": 1},
+            {"accountIndex": 0.5, "communityId": 1},
+            {"accountIndex": 1.0, "communityId": 1},
         ])
         with self.assertRaises(GraphResultInvalid):
             await self.service(session).analyze_louvain(request)
 
     async def test_cross_event_community_is_rejected(self):
         request = Track1AnalysisRequest.model_validate(payload([
-            ticket(1, eventId="event-1"), ticket(2, eventId="event-2")
+            ticket(1, eventId="event-1"), ticket(2, eventId="event-1"),
+            ticket(3, eventId="event-2"), ticket(4, eventId="event-2"),
         ]))
         session = FakeSession(rows=[
-            {"ticketIndex": 0, "communityId": 1},
-            {"ticketIndex": 1, "communityId": 1},
+            {"accountIndex": index, "communityId": 1} for index in range(4)
         ])
         with self.assertRaises(GraphResultInvalid):
             await self.service(session).analyze_louvain(request)

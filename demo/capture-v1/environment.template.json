@@ -1,0 +1,7 @@
+{
+  "note": "격리 합성 환경에서 확정한 값을 사본에 기록합니다. 비밀값은 넣지 않습니다.",
+  "tenantId": "<격리 합성 tenant UUID>",
+  "eventId": "<격리 합성 event UUID>",
+  "performanceId": "<ACTIVE 검증 회차 UUID>",
+  "syntheticIsolationId": "<OFFICIAL_PDF_SYNTHETIC_ISOLATION_ID와 같은 UUID>"
+}

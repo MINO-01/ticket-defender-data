@@ -1,0 +1,131 @@
+{
+  "provider": "gemini",
+  "configuredModel": "gemini-3.1-flash-lite",
+  "realExternalCall": true,
+  "syntheticImagesOnly": true,
+  "budgetExhausted": false,
+  "sdkCalls": 4,
+  "results": [
+    {
+      "image": "listing_A",
+      "imageSha256": "38af848ec605b3980f42f5b38afe0fa6bb0abd1e6323d9efc1c2a72e54b522d3",
+      "httpStatus": 502,
+      "serverSchemaValidated": false,
+      "latencyMs": 8285,
+      "status": 502,
+      "code": "MODEL_RESPONSE_INVALID",
+      "modelName": null,
+      "fields": null,
+      "humanTruth": {
+        "zone": "A",
+        "row": "1",
+        "seat": "9",
+        "askingPrice": 250000,
+        "targetCandidateResult": "MATCH_CANDIDATE"
+      }
+    },
+    {
+      "image": "listing_B",
+      "imageSha256": "940fe255e2175121162908c974d22f8f9d7bcad41d06cf64ccc89d51dfcd261c",
+      "httpStatus": 502,
+      "serverSchemaValidated": false,
+      "latencyMs": 4796,
+      "status": 502,
+      "code": "MODEL_RESPONSE_INVALID",
+      "modelName": null,
+      "fields": null,
+      "humanTruth": {
+        "zone": "D",
+        "row": "20",
+        "seat": "30",
+        "askingPrice": 180000,
+        "targetCandidateResult": "NO_MATCH"
+      }
+    },
+    {
+      "image": "listing_C",
+      "imageSha256": "7c6819e8b1bfa60ba1ad5fe05fe6d6ae3b38ca993f9cf945e4b401e1bf1736de",
+      "httpStatus": 200,
+      "serverSchemaValidated": true,
+      "latencyMs": 17819,
+      "status": "COMPLETED",
+      "code": null,
+      "modelName": "gemini-3.1-flash-lite",
+      "fields": {
+        "eventName": {
+          "state": "FOUND",
+          "value": "합성 캡스톤 라이브 2026",
+          "evidenceQuote": "합성 캡스톤 라이브 2026",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "performanceAt": {
+          "state": "FOUND",
+          "value": "2026년 12월 20일 19:30",
+          "evidenceQuote": "2026년 12월 20일 19:30",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "platformDisplayName": {
+          "state": "FOUND",
+          "value": "합성중고장터",
+          "evidenceQuote": "합성중고장터",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "askingPrice": {
+          "state": "FOUND",
+          "value": {
+            "raw": "200,000원",
+            "amount": "200000.00"
+          },
+          "evidenceQuote": "200,000원",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "currency": {
+          "state": "FOUND",
+          "value": "KRW",
+          "evidenceQuote": "200,000원",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "saleText": {
+          "state": "FOUND",
+          "value": "티켓 양도 문의 주세요",
+          "evidenceQuote": "티켓 양도 문의 주세요",
+          "unknownReason": null,
+          "candidates": []
+        },
+        "zone": {
+          "state": "UNKNOWN",
+          "value": null,
+          "evidenceQuote": null,
+          "unknownReason": "ABSENT",
+          "candidates": []
+        },
+        "row": {
+          "state": "UNKNOWN",
+          "value": null,
+          "evidenceQuote": null,
+          "unknownReason": "ABSENT",
+          "candidates": []
+        },
+        "seat": {
+          "state": "UNKNOWN",
+          "value": null,
+          "evidenceQuote": null,
+          "unknownReason": "ABSENT",
+          "candidates": []
+        }
+      },
+      "humanTruth": {
+        "zone": null,
+        "row": null,
+        "seat": null,
+        "askingPrice": 200000,
+        "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"
+      }
+    }
+  ]
+}

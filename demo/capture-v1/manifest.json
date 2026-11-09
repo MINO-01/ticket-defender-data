@@ -1,0 +1,78 @@
+{
+  "fixtureVersion": "capture-demo-v1",
+  "synthetic": true,
+  "finalForImport": false,
+  "purpose": "격리 합성 환경의 촬영용 자료입니다. run960과 무관하며 실제 인물, 판매글, 개인정보가 없습니다.",
+  "generator": "scripts/generate_capture_demo.py",
+  "font": "malgun.ttf (Windows 시스템 글꼴, 저장소 미포함)",
+  "import": {
+    "sourceVersion": "capture-demo-ledger-v1",
+    "sourceAsOf": "2026-11-08T10:00:00Z",
+    "quantityBasis": "SYNTHETIC_PROVIDER_TICKET_LEDGER",
+    "completeSnapshot": true,
+    "inputType": "INDIVIDUAL_TICKET",
+    "reservationSourceVersion": "capture-demo-reservations-v1"
+  },
+  "performance": {
+    "eventName": "합성 캡스톤 라이브 2026",
+    "performanceText": "2026년 12월 20일 19:30",
+    "performanceRef": "CAPTURE-DEMO-20261220-1930"
+  },
+  "policyToRegister": {
+    "maxTicketsPerAccount": 2,
+    "policyVersion": "capture-demo-policy-r1",
+    "effectiveFrom": "2026-11-01T00:00:00",
+    "limitSubject": "ACCOUNT",
+    "applicationScope": "PERFORMANCE",
+    "cancellationRefundRule": "NETTED",
+    "includesPresale": false
+  },
+  "rowCounts": {
+    "quantityLedger": 67,
+    "reservationSnapshot": 67
+  },
+  "linkedCase": {
+    "reservationReference": "capture-r2-res-3",
+    "account": "capture-r2-3",
+    "seat": {
+      "zone": "A",
+      "row": "1",
+      "seat": "9"
+    }
+  },
+  "humanTruth": {
+    "listing_A": {
+      "zone": "A",
+      "row": "1",
+      "seat": "9",
+      "askingPrice": 250000,
+      "targetCandidateResult": "MATCH_CANDIDATE"
+    },
+    "listing_B": {
+      "zone": "D",
+      "row": "20",
+      "seat": "30",
+      "askingPrice": 180000,
+      "targetCandidateResult": "NO_MATCH"
+    },
+    "listing_C": {
+      "zone": null,
+      "row": null,
+      "seat": null,
+      "askingPrice": 200000,
+      "targetCandidateResult": "UNKNOWN_OR_UNVERIFIABLE"
+    }
+  },
+  "notes": [
+    "targetCandidateResult는 목표이며 결과가 아닙니다. 실제 결과는 모델과 Backend가 결정합니다.",
+    "R2는 실측에서 2개 커뮤니티로 분할되었습니다. capture-r2-3이 속한 군집을 Case 3에 사용합니다.",
+    "Backend 수량 원장에는 네트워크 유형 입력이 없어 R4, N2의 ipNetworkType은 화면에서 미확인으로 표시됩니다."
+  ],
+  "files": {
+    "quantity_ledger.csv": "3a59e3d94ddca6a4d6a005184c3db59e1819968c26f2d20d60ab7dc3a3a767c3",
+    "reservation_snapshot.csv": "55124b41e2d7209b4cdbc30860b904f17abb59b4769ceebc60b63eb813b5fe1b",
+    "images/listing_A.png": "84b6d4fa733a1a1e5da03a2bf9c12ae1b165ba2d06cf7bb1d2e4e89b9e9e05da",
+    "images/listing_B.png": "27b9ceaad917504d83e4af5cd66b00fb7988a0be0ac89afe1319bc048d40d815",
+    "images/listing_C.png": "7c6819e8b1bfa60ba1ad5fe05fe6d6ae3b38ca993f9cf945e4b401e1bf1736de"
+  }
+}

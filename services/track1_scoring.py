@@ -369,7 +369,8 @@ def purchase_limit_evaluations(request: Track1LimitAnalysisRequest) -> list[Trac
         if policy is None:
             results.append(not_evaluated("POLICY_NOT_CONFIRMED"))
             continue
-        if not scope.quantity_is_complete:
+        # 스냅샷 기준 시각 이후의 구매는 수량에 반영됐다고 볼 수 없어 한도를 판정하지 않습니다.
+        if not scope.quantity_is_complete or any(ticket.purchased_at > scope.quantity_as_of for ticket in tickets):
             results.append(not_evaluated("QUANTITY_DATA_INCOMPLETE"))
             continue
         if not all(policy.applies_at(ticket.purchased_at) for ticket in tickets):

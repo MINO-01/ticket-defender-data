@@ -46,7 +46,7 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 - `COMPLETE`는 `quantitySourceVersion`, `quantityAsOf`가 있어야 한다고 명시됐고 구현과 일치한다.
 - `effectiveFrom` 포함, `effectiveUntil` 제외, UTC 시각 변환 기준이 명시됐고 구현과 일치한다.
 - 계약 상태는 여전히 `PROPOSED_FOR_CROSS_REPOSITORY_REVIEW`다. **Spring 소비자는 아직 연결되지 않았다.** `MacroAnalysisRequest`와 `FastApiAdapter`는 v2 필드를 보내지 않고, `purchasedAt`과 `effectiveTicketQuantity`를 공급하는 코드도 없다.
-- `purchasedAt`이 `quantityAsOf`보다 늦은 경우의 처리는 계약에 없다.
+- `purchasedAt`이 `quantityAsOf`보다 늦은 경우의 처리는 계약에 없다. Data는 스냅샷이 해당 구매를 포함한다고 볼 수 없으므로 그런 티켓이 하나라도 있으면 회차 전체를 `QUANTITY_DATA_INCOMPLETE`로 돌려준다(같은 시각은 평가). 잠정 동작이며 Backend 계약 반영은 OPEN이다.
 - 정책과 범위 외의 스키마 오류 코드가 `ContractError`에 없어 기존 `{"detail": [{"code": ...}]}` 형식을 유지했다.
 - 같은 `eventId` 안에서 `(accountId, reservationNo, eventId)`는 응답 `members` 식별자이므로 요청 전체에서 중복을 거부한다.
 

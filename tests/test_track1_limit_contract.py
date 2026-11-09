@@ -183,6 +183,23 @@ class LimitContractTests(unittest.TestCase):
         result = self.evaluation(body([ticket(quantity=9, paymentHash=PAY)], [value]))
         self.assertEqual(result["status"], "QUANTITY_DATA_INCOMPLETE")
 
+    def test_purchase_after_quantity_snapshot_blocks_whole_scope(self):
+        """기준 시각과 같은 구매는 평가하고, 이후 구매가 하나라도 있으면 회차 전체를 판정하지 않습니다."""
+
+        for purchased, status in (
+            ("2026-11-08T10:00:00Z", "EVALUATED"),
+            ("2026-11-08T19:00:00+09:00", "EVALUATED"),
+            ("2026-11-08T10:00:01Z", "QUANTITY_DATA_INCOMPLETE"),
+            ("2026-11-08T19:00:01+09:00", "QUANTITY_DATA_INCOMPLETE"),
+        ):
+            with self.subTest(purchased=purchased):
+                result = self.evaluation(body([
+                    ticket(reservation="r1", quantity=3, paymentHash=PAY),
+                    ticket(reservation="r2", quantity=1, purchased=purchased, paymentHash=PAY),
+                ]))
+                self.assertEqual(result["status"], status)
+                self.assertEqual(len(result["accountLimitFindings"]), 1 if status == "EVALUATED" else 0)
+
     def test_policy_interval_boundaries(self):
         """시작 시각은 평가하고 종료 시각은 판정하지 않는 잠정 경계입니다."""
 

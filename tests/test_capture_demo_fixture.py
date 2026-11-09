@@ -53,6 +53,21 @@ class CaptureDemoFixtureTests(unittest.TestCase):
         seat = next(s for s in capture.assign_seats(capture.build_rows()) if s["reservation"] == "akmu-r2-res-3")
         self.assertEqual((seat["zone"], seat["row"], seat["seat"]), ("19", "8", "12"))
 
+    def test_listing_a_price_shows_the_iso_currency_and_keeps_the_amount(self):
+        self.assertEqual(capture.LISTING_A_PRICE_TEXT, "200,000원 (KRW)")
+        truth = self.manifest["humanTruth"]["listing_A"]
+        self.assertEqual(truth["askingPrice"], 200000)
+        self.assertEqual(truth["displayPrice"], "200,000원 (KRW)")
+        self.assertEqual(truth["currency"], "KRW")
+
+    def test_generator_uses_the_price_text_for_listing_a_only(self):
+        source = (SCRIPTS / "generate_capture_demo.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count('("판매가", LISTING_A_PRICE_TEXT)'), 1)
+
+    def test_ledgers_are_tracked_with_the_fixture_and_not_ignored_globally(self):
+        for name in ("quantity_ledger.csv", "reservation_snapshot.csv"):
+            self.assertTrue((capture.OUTPUT / name).is_file(), name)
+
     def test_performance_matches_the_demo_standard(self):
         performance = self.manifest["performance"]
         self.assertEqual(performance["eventName"], "악동뮤지션 대전 콘서트 (합성 시연)")

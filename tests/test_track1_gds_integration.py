@@ -1,12 +1,14 @@
 import asyncio
+import json
 import os
 import socket
 import unittest
+from pathlib import Path
 from uuid import uuid4
 
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
-from schemas.dto import Track1AnalysisRequest
+from schemas.dto import Track1AnalysisRequest, Track1LimitAnalysisRequest
 from services.graph_service import GraphService
 
 
@@ -159,6 +161,28 @@ class Track1GdsIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.graph_names(), before_graphs)
         self.assertEqual(await self.store_counts(), before_store)
         self.assertEqual(self.service.driver.projected, self.service.driver.dropped)
+
+    async def test_v2_demo_scenario_separates_relationship_from_limit_signal(self):
+        """합성 시나리오에서 실제 Louvain 군집과 구매 한도 신호가 섞이지 않는지 확인합니다."""
+
+        fixtures = Path(__file__).parent / "fixtures"
+        payload = json.loads((fixtures / "track1_v2_demo_scenario.json").read_text(encoding="utf-8"))
+        manifest = json.loads((fixtures / "track1_v2_demo_scenario.manifest.json").read_text(encoding="utf-8"))
+        response = await self.service.analyze_louvain_with_limits(Track1LimitAnalysisRequest.model_validate(payload))
+
+        self.assertIn("score-v2", response.algorithm_version)
+        self.assertEqual(len(response.clusters), 1)
+        cluster = response.clusters[0]
+        self.assertEqual(sorted({m.account_id for m in cluster.members}), manifest["expected"]["clusterAccounts"])
+        # 다좌석 라인이 있어도 구성원은 예매 단위로 하나씩입니다.
+        self.assertEqual(len(cluster.members), len({(m.account_id, m.reservation_no) for m in cluster.members}))
+        self.assertEqual(cluster.ip_hashes, [])
+        statuses = {item.performance_id: item.status for item in response.purchase_limit_evaluations}
+        self.assertEqual(statuses, manifest["expected"]["evaluations"])
+        evaluated = next(item for item in response.purchase_limit_evaluations if item.status == "EVALUATED")
+        self.assertEqual(
+            [(f.account_id, f.effective_ticket_quantity) for f in evaluated.account_limit_findings], [("solo-over", 3)],
+        )
 
     async def test_concurrent_requests_are_isolated_and_cleaned(self):
         before_graphs = await self.graph_names()

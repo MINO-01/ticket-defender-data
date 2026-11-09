@@ -1,0 +1,28 @@
+{
+  "fixture": "track1_v2_demo_scenario.json",
+  "fixtureVersion": "track1-v2-demo-scenario-1",
+  "purpose": "ISOLATED_CONTRACT_AND_GDS_VERIFICATION",
+  "synthetic": true,
+  "finalForImport": false,
+  "requestSha256": "84c6b75b815c9ca9646021cd2a18eef9d54cf06d30f20212a301c195d6c737ec",
+  "note": "A3 반입용 원장이 아니며 run960과 무관합니다. 구성과 기대 결과는 분석 결과를 보기 전에 정했습니다.",
+  "expected": {
+    "clusterAccounts": [
+      "ring-1",
+      "ring-2",
+      "ring-3",
+      "ring-4"
+    ],
+    "evaluations": {
+      "22222222-2222-4222-8222-22222222aaaa": "EVALUATED",
+      "22222222-2222-4222-8222-22222222bbbb": "POLICY_NOT_CONFIRMED",
+      "22222222-2222-4222-8222-22222222cccc": "QUANTITY_DATA_INCOMPLETE"
+    },
+    "limitFindings": [
+      {
+        "accountId": "solo-over",
+        "effectiveTicketQuantity": 3
+      }
+    ]
+  }
+}

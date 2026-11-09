@@ -50,6 +50,10 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 - 정책과 범위 외의 스키마 오류 코드가 `ContractError`에 없어 기존 `{"detail": [{"code": ...}]}` 형식을 유지했다.
 - 같은 `eventId` 안에서 `(accountId, reservationNo, eventId)`는 응답 `members` 식별자이므로 요청 전체에서 중복을 거부한다.
 
+### 합성 시나리오 격리 검증 (2026-11-09, Neo4j 5.19.0, GDS 2.6.6)
+
+`tests/fixtures/track1_v2_demo_scenario.json`과 manifest는 계약 검증 전용 합성 입력이며 A3 반입 원장이 아니다(`finalForImport: false`). 실제 `gds.louvain.stream`에서 결제와 기기를 공유한 4계정만 군집이 됐고, 공용 IP 허브 10계정과 단독 계정은 군집이 아니었다. 다좌석 3매 계정만 한도 초과 신호이며, 정책 미확인 회차와 수량 불완전 회차는 각각 `POLICY_NOT_CONFIRMED`, `QUANTITY_DATA_INCOMPLETE`로 남았다. 합성 구조의 동작 확인이며 탐지 성능 수치가 아니다.
+
 ### Backend #79 입력 계약 대조 (Backend `8d8f37a`, YAML은 `eed2106`과 동일)
 
 계약 상태는 여전히 `PROPOSED_FOR_CROSS_REPOSITORY_REVIEW`다. YAML의 `x-backend-input-contract`는 Data 변경 항목을 나열하지만 필드의 위치, 타입, 필수 여부와 응답 상태 스키마가 없다. 양쪽에서 확정된 불일치가 아니므로 Data 코드는 변경하지 않았다. 계정별 집계를 개별 티켓 DTO로 꾸며 보내지 않는다.
@@ -71,7 +75,7 @@ R/N 생성 라벨은 분석 입력에 전달하지 않는다. N1, N2, N3의 낮�
 
 ### 개별 티켓 입력 처리 (Backend PR #80 `82c5899` 대응)
 
-v2 `tickets`에 Backend YAML이 이름을 정한 선택 필드를 받는다. Spring v2 DTO는 아직 이 필드를 보내지 않으므로 **Data 구현 완료, Spring 통합 대기**다. 필드가 없는 기존 요청의 동작은 바뀌지 않는다. 아래 규칙은 평가를 막기만 하며 finding이나 점수를 새로 만들지 않는다. 계약 확정 시 바뀔 수 있는 잠정 동작이다.
+v2 `tickets`에 Backend YAML이 이름을 정한 선택 필드를 받는다. Backend main `5d80788`의 Spring v2 DTO도 같은 필드를 갖지만 값을 공급하는 수량 원장은 Issue #81 대기이므로 **Data 구현 완료, Spring 통합 대기**다. 필드가 없는 기존 요청의 동작은 바뀌지 않는다. 아래 규칙은 평가를 막기만 하며 finding이나 점수를 새로 만들지 않는다. 계약 확정 시 바뀔 수 있는 잠정 동작이다.
 
 | 입력 | 결과 |
 | --- | --- |

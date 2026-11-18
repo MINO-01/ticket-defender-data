@@ -329,6 +329,97 @@ class Track1LimitAnalysisResponse(Track1AnalysisResponse):
     purchase_limit_evaluations: List[Track1PurchaseLimitEvaluation] = Field(alias="purchaseLimitEvaluations")
 
 
+# 대용량 Track 1 작업은 HTTP 본문으로 티켓 배열을 받지 않는다. 입력 행은 승인된
+# 비공개 객체의 NDJSON으로만 전달하며, manifest는 그 객체와 분석 범위를 고정한다.
+BulkId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
+Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class Track1BulkArtifactManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: BulkId = Field(alias="artifactId")
+    object_key: BulkId = Field(alias="objectKey")
+    object_version: BulkId = Field(alias="objectVersion")
+    sha256: Sha256Hex
+    record_count: Annotated[StrictInt, Field(ge=1, le=10_000_000)] = Field(alias="recordCount")
+    input_format_version: Literal["track1-limit-ndjson-v1"] = Field(alias="inputFormatVersion")
+    tenant_id: TicketIdentifier = Field(alias="tenantId")
+    event_id: TicketIdentifier = Field(alias="eventId")
+    ledger_version: TicketIdentifier = Field(alias="ledgerVersion")
+    ledger_generation: TicketIdentifier = Field(alias="ledgerGeneration")
+    ledger_revision: TicketIdentifier = Field(alias="ledgerRevision")
+    source_version: TicketIdentifier = Field(alias="sourceVersion")
+    source_as_of: AwareDatetime = Field(alias="sourceAsOf")
+    hmac_purpose: TicketIdentifier = Field(alias="hmacPurpose")
+    hmac_key_version: TicketIdentifier = Field(alias="hmacKeyVersion")
+    policy_version: TicketIdentifier = Field(alias="policyVersion")
+    performance_scopes: List[Track1PerformanceScope] = Field(min_length=1, alias="performanceScopes")
+
+    @model_validator(mode="after")
+    def validate_manifest(self):
+        # URL, bucket 및 파일 경로를 받지 않는다. objectKey는 configured prefix 아래의
+        # opaque object name이며 separator를 허용하지 않는다.
+        if any(separator in self.object_key for separator in ("/", "\\", ":")):
+            raise PydanticCustomError("INVALID_ARTIFACT_REFERENCE", "objectKey must be an opaque object name")
+        if any(scope.event_id != self.event_id for scope in self.performance_scopes):
+            raise PydanticCustomError("MANIFEST_SCOPE_MISMATCH", "performance scopes must match manifest event")
+        return self
+
+
+class Track1BulkJobCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manifest: Track1BulkArtifactManifest
+
+
+class Track1BulkJobAccepted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    status: Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "INPUT_REJECTED", "CANCELLED", "INTERRUPTED"]
+    existing: bool = False
+
+
+class Track1BulkJobStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    status: Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "INPUT_REJECTED", "CANCELLED", "INTERRUPTED"]
+    input_record_count: int = Field(ge=0, alias="inputRecordCount")
+    processed_record_count: int = Field(ge=0, alias="processedRecordCount")
+    algorithm_version: Optional[str] = Field(default=None, alias="algorithmVersion")
+    failure_code: Optional[str] = Field(default=None, alias="failureCode")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+
+
+class Track1BulkClusterSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: str = Field(alias="clusterId")
+    risk_score: float = Field(ge=0, le=1, alias="riskScore")
+    member_count: int = Field(ge=2, alias="memberCount")
+    members: List[Track1ClusterMember]
+    has_more_members: bool = Field(alias="hasMoreMembers")
+    payment_hashes: List[HashToken] = Field(alias="paymentHashes")
+    address_hashes: List[HashToken] = Field(alias="addressHashes")
+    device_id_hashes: List[HashToken] = Field(alias="deviceIdHashes")
+    ip_hashes: List[HashToken] = Field(alias="ipHashes")
+
+
+class Track1BulkJobResults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    status: Literal["COMPLETED"]
+    algorithm_version: str = Field(alias="algorithmVersion")
+    next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+    clusters: List[Track1BulkClusterSummary]
+    shared_signal_observations: List[Track1SharedSignalObservation] = Field(alias="sharedSignalObservations")
+    purchase_limit_evaluations: List[Track1PurchaseLimitEvaluation] = Field(alias="purchaseLimitEvaluations")
+
+
 # VLM 제보 파싱 DTO
 class VLMParsedData(BaseModel):
     """Legacy seat response shape with bounded model-provided strings."""

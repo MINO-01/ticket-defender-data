@@ -123,4 +123,5 @@ app.add_middleware(Track1AuthGate)
 
 app.include_router(graph_routes.router, prefix="/api/v1")
 app.include_router(graph_routes.v2_router, prefix="/api/v2")
+app.include_router(graph_routes.bulk_router, prefix="/api/v2")
 app.include_router(vlm_routes.router, prefix="/api/v1")

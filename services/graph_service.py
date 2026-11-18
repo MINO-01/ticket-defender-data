@@ -1,4 +1,5 @@
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import List, Dict, Any
@@ -13,6 +14,7 @@ from services.track1_scoring import (
     build_account_token_graph, clusters_from_account_communities, purchase_limit_evaluations,
     shared_signal_observations,
 )
+from services.track1_bulk_jobs import GdsResourceExhausted, JobCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,126 @@ class GraphService:
             sharedSignalObservations=analysis.shared_signal_observations,
             purchaseLimitEvaluations=purchase_limit_evaluations(request),
         )
+
+    async def analyze_bulk_sqlite(self, repository, job_id: str, manifest) -> str:
+        """Project one complete SQLite-staged job and stream only account communities.
+
+        This intentionally does not use ``load_json_to_graph``: that legacy
+        method has global labels and materialises a caller-supplied list.  Every
+        temporary Neo4j element below has the immutable job id, and cleanup can
+        therefore never delete an existing tenant graph.
+        """
+        graph_name = f"track1_bulk_{job_id.replace('-', '')}"
+        projection_created = False
+        graph_rows = []
+        edge_rows = []
+        account_count = 0
+        edge_count = 0
+        max_edges = int(os.getenv("TRACK1_BULK_MAX_PROJECTED_EDGES", "5000000"))
+
+        async def flush_accounts(session):
+            nonlocal account_count
+            if graph_rows:
+                await (await session.run("""
+                    UNWIND $rows AS row
+                    MERGE (a:TD36Account {jobId:$job_id, scope:row.scope, accountId:row.account_id})
+                    SET a.accountKey = row.scope + '\u0000' + row.account_id
+                    """, job_id=job_id, rows=graph_rows)).consume()
+                account_count += len(graph_rows)
+                graph_rows.clear()
+
+        async def flush_edges(session):
+            nonlocal edge_count
+            if edge_rows:
+                await (await session.run("""
+                    UNWIND $rows AS row
+                    MATCH (a:TD36Account {jobId:$job_id, scope:row.scope, accountId:row.accountId})
+                    MERGE (t:TD36Token {jobId:$job_id, scope:row.scope, signal:row.signal, token:row.token})
+                    MERGE (a)-[r:TD36_SIGNAL {jobId:$job_id}]->(t)
+                    SET r.weight=row.weight
+                    """, job_id=job_id, rows=edge_rows)).consume()
+                edge_count += len(edge_rows)
+                if edge_count > max_edges:
+                    raise GdsResourceExhausted()
+                edge_rows.clear()
+
+        async with self.driver.session() as session:
+            try:
+                try:
+                    version_record = await (await session.run("RETURN gds.version() AS version")).single()
+                except Neo4jError:
+                    raise GraphAnalysisUnavailable("GDS is unavailable") from None
+                if not version_record or not version_record["version"]:
+                    raise GraphAnalysisUnavailable("GDS version is unavailable")
+                algorithm = f"gds-{version_record['version']};{PROJECTION_VERSION};{SCORE_VERSION}"
+                for row in repository.graph_rows(job_id):
+                    graph_rows.append({"scope": row["scope"], "account_id": row["account_id"]})
+                    if len(graph_rows) >= 500:
+                        await flush_accounts(session)
+                        if repository.cancelled(job_id):
+                            raise JobCancelled()
+                await flush_accounts(session)
+                for edge in repository.projected_edges(job_id):
+                    edge_rows.append(edge)
+                    if len(edge_rows) >= 500:
+                        await flush_edges(session)
+                        if repository.cancelled(job_id):
+                            raise JobCancelled()
+                await flush_edges(session)
+                if edge_count == 0:
+                    return algorithm
+                projection_created = True
+                projection = await session.run("""
+                    CALL gds.graph.project.cypher(
+                      $graph_name,
+                      'MATCH (n {jobId: $job_id}) WHERE n:TD36Account OR n:TD36Token RETURN id(n) AS id',
+                      'MATCH (a:TD36Account {jobId: $job_id})-[r:TD36_SIGNAL {jobId: $job_id}]->(t:TD36Token {jobId: $job_id}) RETURN id(a) AS source, id(t) AS target, r.weight AS weight',
+                      {relationshipProperties: 'weight', validateRelationships: true, parameters: {job_id: $job_id}}
+                    ) YIELD nodeCount RETURN nodeCount
+                    """, graph_name=graph_name, job_id=job_id)
+                projection_record = await projection.single()
+                if not projection_record or projection_record["nodeCount"] < account_count:
+                    raise GraphResultInvalid("Incomplete bulk graph projection")
+                result = await session.run("""
+                    CALL gds.louvain.stream($graph_name, {relationshipWeightProperty:'weight', concurrency:1})
+                    YIELD nodeId, communityId
+                    WITH gds.util.asNode(nodeId) AS n, communityId
+                    WHERE n:TD36Account AND n.jobId=$job_id
+                    RETURN n.scope AS scope, n.accountId AS accountId, communityId
+                    """, graph_name=graph_name, job_id=job_id)
+                repository.clear_communities(job_id)
+                buffered, seen = [], 0
+                async for record in result:
+                    buffered.append((record["scope"], record["accountId"], int(record["communityId"])))
+                    seen += 1
+                    if len(buffered) >= 500:
+                        repository.add_community_batch(job_id, buffered)
+                        buffered.clear()
+                        if repository.cancelled(job_id):
+                            raise JobCancelled()
+                if buffered:
+                    repository.add_community_batch(job_id, buffered)
+                if seen != account_count:
+                    raise GraphResultInvalid("Incomplete bulk Louvain result")
+                return algorithm
+            except MemoryError as exc:
+                raise GdsResourceExhausted() from exc
+            except Neo4jError as exc:
+                # GDS uses Neo4j errors for projection/algorithm memory admission.
+                if "memory" in str(exc).lower() or "memory" in (exc.code or "").lower():
+                    raise GdsResourceExhausted() from exc
+                raise
+            finally:
+                if projection_created:
+                    try:
+                        await (await session.run("CALL gds.graph.drop($graph_name, false) YIELD graphName RETURN graphName", graph_name=graph_name)).consume()
+                    except Exception:
+                        logger.error("Track 1 bulk graph cleanup failed")
+                # The label/key predicates make this cleanup strictly job-local.
+                try:
+                    await (await session.run("MATCH (n {jobId:$job_id}) WHERE n:TD36Account OR n:TD36Token DETACH DELETE n", job_id=job_id)).consume()
+                except Exception:
+                    logger.error("Track 1 bulk Neo4j temporary-data cleanup failed")
 
     async def load_json_to_graph(self, tickets: list) -> None:
         """

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import uuid
@@ -193,20 +194,28 @@ class GraphService:
                 if not version_record or not version_record["version"]:
                     raise GraphAnalysisUnavailable("GDS version is unavailable")
                 algorithm = f"gds-{version_record['version']};{PROJECTION_VERSION};{SCORE_VERSION}"
-                for row in repository.graph_rows(job_id):
-                    graph_rows.append({"scope": row["scope"], "account_id": row["account_id"]})
-                    if len(graph_rows) >= 500:
-                        await flush_accounts(session)
-                        if repository.cancelled(job_id):
-                            raise JobCancelled()
-                await flush_accounts(session)
-                for edge in repository.projected_edges(job_id):
-                    edge_rows.append(edge)
-                    if len(edge_rows) >= 500:
-                        await flush_edges(session)
-                        if repository.cancelled(job_id):
-                            raise JobCancelled()
-                await flush_edges(session)
+                account_offset = 0
+                while True:
+                    account_page = await asyncio.to_thread(repository.graph_row_page, job_id, account_offset, 500)
+                    if not account_page:
+                        break
+                    for row in account_page:
+                        graph_rows.append(row)
+                    await flush_accounts(session)
+                    account_offset += len(account_page)
+                    if await asyncio.to_thread(repository.cancelled, job_id):
+                        raise JobCancelled()
+                await asyncio.to_thread(repository.prepare_projected_tokens, job_id)
+                edge_offset = 0
+                while True:
+                    edge_page = await asyncio.to_thread(repository.projected_edge_page, job_id, edge_offset, 500)
+                    if not edge_page:
+                        break
+                    edge_rows.extend(edge_page)
+                    await flush_edges(session)
+                    edge_offset += len(edge_page)
+                    if await asyncio.to_thread(repository.cancelled, job_id):
+                        raise JobCancelled()
                 if edge_count == 0:
                     return algorithm
                 projection_created = True
@@ -236,7 +245,7 @@ class GraphService:
                     if len(buffered) >= 500:
                         repository.add_community_batch(job_id, buffered)
                         buffered.clear()
-                        if repository.cancelled(job_id):
+                        if await asyncio.to_thread(repository.cancelled, job_id):
                             raise JobCancelled()
                 if buffered:
                     repository.add_community_batch(job_id, buffered)

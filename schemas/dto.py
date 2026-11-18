@@ -364,6 +364,18 @@ class Track1BulkArtifactManifest(BaseModel):
             raise PydanticCustomError("INVALID_ARTIFACT_REFERENCE", "objectKey must be an opaque object name")
         if any(scope.event_id != self.event_id for scope in self.performance_scopes):
             raise PydanticCustomError("MANIFEST_SCOPE_MISMATCH", "performance scopes must match manifest event")
+        for scope in self.performance_scopes:
+            if (
+                scope.policy_verification_status != "CONFIRMED"
+                or scope.policy is None
+                or scope.policy.policy_version != self.policy_version
+                or scope.quantity_source_version != self.source_version
+                or scope.quantity_as_of != self.source_as_of
+            ):
+                raise PydanticCustomError(
+                    "MANIFEST_PROVENANCE_MISMATCH",
+                    "performance scope policy and source metadata must match manifest",
+                )
         return self
 
 
@@ -416,8 +428,21 @@ class Track1BulkJobResults(BaseModel):
     algorithm_version: str = Field(alias="algorithmVersion")
     next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
     clusters: List[Track1BulkClusterSummary]
+    shared_signal_observations_status: Literal["NOT_IMPLEMENTED"] = Field(alias="sharedSignalObservationsStatus")
     shared_signal_observations: List[Track1SharedSignalObservation] = Field(alias="sharedSignalObservations")
+    purchase_limit_evaluations_status: Literal["NOT_IMPLEMENTED"] = Field(alias="purchaseLimitEvaluationsStatus")
     purchase_limit_evaluations: List[Track1PurchaseLimitEvaluation] = Field(alias="purchaseLimitEvaluations")
+
+
+class Track1BulkClusterMemberPage(BaseModel):
+    """A bounded page of one cluster's ticket identifiers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    cluster_id: str = Field(alias="clusterId")
+    next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+    members: List[Track1ClusterMember]
 
 
 # VLM 제보 파싱 DTO

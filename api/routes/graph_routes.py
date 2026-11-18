@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from neo4j.exceptions import AuthError, Neo4jError, ServiceUnavailable, SessionExpired
 from schemas.dto import (
     Track1AnalysisRequest, Track1AnalysisResponse, Track1LimitAnalysisRequest, Track1LimitAnalysisResponse,
-    Track1BulkJobCreateRequest, Track1BulkJobAccepted, Track1BulkJobResults, Track1BulkJobStatus,
+    Track1BulkClusterMemberPage, Track1BulkJobCreateRequest, Track1BulkJobAccepted, Track1BulkJobResults, Track1BulkJobStatus,
 )
 from core.dependencies import get_graph_service, get_track1_bulk_job_service
 from services.graph_service import GraphAnalysisUnavailable, GraphResultInvalid, GraphService
@@ -90,6 +90,17 @@ async def get_bulk_analysis_results(
     service=Depends(get_track1_bulk_job_service),
 ):
     return service.repository.results(job_id, cursor, limit, member_limit)
+
+
+@bulk_router.get("/{job_id}/results/{cluster_id}/members", response_model=Track1BulkClusterMemberPage)
+async def get_bulk_cluster_members(
+    job_id: str,
+    cluster_id: str,
+    cursor: str | None = Query(default=None, pattern=r"^\d+$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    service=Depends(get_track1_bulk_job_service),
+):
+    return service.repository.member_page(job_id, cluster_id, cursor, limit)
 
 
 @router.post("/macro", include_in_schema=False)

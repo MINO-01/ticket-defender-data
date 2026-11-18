@@ -22,13 +22,14 @@ from typing import Iterable
 from fastapi import HTTPException
 from schemas.dto import (
     Track1BulkArtifactManifest, Track1BulkClusterSummary, Track1BulkJobAccepted,
-    Track1BulkJobResults, Track1BulkJobStatus, Track1LimitTicketInput,
+    Track1BulkClusterMemberPage, Track1BulkJobResults, Track1BulkJobStatus, Track1LimitTicketInput,
 )
 from services.track1_scoring import DEFAULT_PARAMETERS, SIGNALS, is_hub, score_v2
 
 
 STATES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "INPUT_REJECTED", "CANCELLED", "INTERRUPTED"}
 TERMINAL = {"COMPLETED", "FAILED", "INPUT_REJECTED", "CANCELLED"}
+MAX_NDJSON_LINE_BYTES = 1_048_576
 
 
 class BulkJobError(Exception):
@@ -223,6 +224,8 @@ class BulkJobRepository:
             for chunk in chunks:
                 digest.update(chunk)
                 carry += chunk
+                if len(carry) > MAX_NDJSON_LINE_BYTES:
+                    raise InputRejected("INPUT_ROW_TOO_LARGE")
                 lines = carry.split(b"\n")
                 carry = lines.pop()
                 for line in lines:
@@ -248,8 +251,18 @@ class BulkJobRepository:
         except Exception as exc:
             raise InputRejected("INPUT_ROW_INVALID") from exc
         scope = scopes.get(ticket.analysis_scope)
-        if scope is None or ticket.event_id != manifest.event_id:
+        if scope is None or scope.event_id != ticket.event_id or ticket.event_id != manifest.event_id:
             raise InputRejected("INPUT_SCOPE_MISMATCH")
+        if ticket.source_version != manifest.source_version or ticket.source_as_of != manifest.source_as_of:
+            raise InputRejected("INPUT_SOURCE_MISMATCH")
+        if (
+            scope.quantity_source_version != manifest.source_version
+            or scope.quantity_as_of != manifest.source_as_of
+            or scope.policy_verification_status != "CONFIRMED"
+            or scope.policy is None
+            or scope.policy.policy_version != manifest.policy_version
+        ):
+            raise InputRejected("INPUT_POLICY_OR_SCOPE_PROVENANCE_MISMATCH")
         row_no += 1
         try:
             db.execute("INSERT INTO bulk_input_rows VALUES(?,?,?,?,?,?,?)", (job_id, row_no, ticket.analysis_scope, ticket.account_id, ticket.reservation_no, ticket.ticket_reference or "", json.dumps(ticket.model_dump(mode="json", by_alias=True), separators=(",", ":"))))
@@ -262,20 +275,27 @@ class BulkJobRepository:
                 db.execute("INSERT OR IGNORE INTO bulk_token_owners(job_id,scope,signal,token,account_id) VALUES(?,?,?,?,?)", (job_id, ticket.analysis_scope, signal, token, ticket.account_id))
         return row_no
 
-    def graph_rows(self, job_id: str) -> Iterable[sqlite3.Row]:
+    def graph_row_page(self, job_id: str, offset: int, limit: int) -> list[dict]:
         with _connect(self.path) as db:
-            yield from db.execute("SELECT scope, account_id FROM bulk_accounts WHERE job_id=? ORDER BY scope, account_id", (job_id,))
+            return [dict(row) for row in db.execute(
+                "SELECT scope, account_id FROM bulk_accounts WHERE job_id=? ORDER BY scope, account_id LIMIT ? OFFSET ?",
+                (job_id, limit, offset),
+            )]
 
-    def projected_edges(self, job_id: str) -> Iterable[dict]:
+    def prepare_projected_tokens(self, job_id: str) -> None:
         with _connect(self.path) as db:
             counts = {row["scope"]: row["n"] for row in db.execute("SELECT scope,count(*) n FROM bulk_accounts WHERE job_id=? GROUP BY scope", (job_id,))}
-            tokens = db.execute("SELECT scope,signal,token,count(*) n FROM bulk_token_owners WHERE job_id=? GROUP BY scope,signal,token", (job_id,)).fetchall()
-            for token in tokens:
+            db.execute("UPDATE bulk_token_owners SET projected=0 WHERE job_id=?", (job_id,))
+            for token in db.execute("SELECT scope,signal,token,count(*) n FROM bulk_token_owners WHERE job_id=? GROUP BY scope,signal,token", (job_id,)):
                 if token["n"] < 2 or is_hub(token["signal"], token["n"], DEFAULT_PARAMETERS, counts[token["scope"]]):
                     continue
                 db.execute("UPDATE bulk_token_owners SET projected=1 WHERE job_id=? AND scope=? AND signal=? AND token=?", (job_id, token["scope"], token["signal"], token["token"]))
-                for owner in db.execute("SELECT account_id FROM bulk_token_owners WHERE job_id=? AND scope=? AND signal=? AND token=?", (job_id, token["scope"], token["signal"], token["token"])):
-                    yield {"scope": token["scope"], "signal": token["signal"], "token": token["token"], "accountId": owner["account_id"], "weight": DEFAULT_PARAMETERS.signal_weights[token["signal"]]}
+
+    def projected_edge_page(self, job_id: str, offset: int, limit: int) -> list[dict]:
+        with _connect(self.path) as db:
+            rows = db.execute("""SELECT scope,signal,token,account_id FROM bulk_token_owners
+                WHERE job_id=? AND projected=1 ORDER BY scope,signal,token,account_id LIMIT ? OFFSET ?""", (job_id, limit, offset))
+            return [{"scope": row["scope"], "signal": row["signal"], "token": row["token"], "accountId": row["account_id"], "weight": DEFAULT_PARAMETERS.signal_weights[row["signal"]]} for row in rows]
 
     def clear_communities(self, job_id: str) -> None:
         with _connect(self.path) as db:
@@ -288,8 +308,7 @@ class BulkJobRepository:
 
     def build_result_indexes(self, job_id: str, manifest: Track1BulkArtifactManifest) -> None:
         with _connect(self.path) as db:
-            groups = db.execute("SELECT scope,community_id,count(*) count FROM bulk_communities WHERE job_id=? GROUP BY scope,community_id HAVING count(*)>=2", (job_id,)).fetchall()
-            for group in groups:
+            for group in db.execute("SELECT scope,community_id,count(*) count FROM bulk_communities WHERE job_id=? GROUP BY scope,community_id HAVING count(*)>=2", (job_id,)):
                 shared = {signal: [] for signal in SIGNALS}
                 coverage = {signal: 0 for signal in SIGNALS}
                 members = "SELECT account_id FROM bulk_communities WHERE job_id=? AND scope=? AND community_id=?"
@@ -328,7 +347,21 @@ class BulkJobRepository:
                 signals = json.loads(row["signals_json"])
                 clusters.append(Track1BulkClusterSummary(clusterId=row["cluster_id"], riskScore=row["risk_score"], memberCount=row["member_count"], members=members, hasMoreMembers=len(tickets) > member_limit, paymentHashes=signals["payment_hash"], addressHashes=signals["address_hash"], deviceIdHashes=signals["device_id_hash"], ipHashes=signals["ip_hash"]))
             aux = db.execute("SELECT observations_json,limits_json FROM bulk_aux_results WHERE job_id=?", (job_id,)).fetchone()
-        return Track1BulkJobResults(jobId=job_id, status="COMPLETED", algorithmVersion=status.algorithm_version or "", nextCursor=str(offset + limit) if len(rows) > limit else None, clusters=clusters, sharedSignalObservations=json.loads(aux["observations_json"]), purchaseLimitEvaluations=json.loads(aux["limits_json"]))
+        return Track1BulkJobResults(jobId=job_id, status="COMPLETED", algorithmVersion=status.algorithm_version or "", nextCursor=str(offset + limit) if len(rows) > limit else None, clusters=clusters, sharedSignalObservationsStatus="NOT_IMPLEMENTED", sharedSignalObservations=json.loads(aux["observations_json"]), purchaseLimitEvaluationsStatus="NOT_IMPLEMENTED", purchaseLimitEvaluations=json.loads(aux["limits_json"]))
+
+    def member_page(self, job_id: str, cluster_id: str, cursor: str | None, limit: int) -> Track1BulkClusterMemberPage:
+        status = self.status(job_id)
+        if status.status != "COMPLETED":
+            raise HTTPException(409, detail={"code": "RESULT_NOT_AVAILABLE", "status": status.status})
+        offset = int(cursor or 0)
+        with _connect(self.path) as db:
+            cluster = db.execute("SELECT scope,community_id FROM bulk_clusters WHERE job_id=? AND cluster_id=?", (job_id, cluster_id)).fetchone()
+            if not cluster:
+                raise HTTPException(404, detail={"code": "CLUSTER_NOT_FOUND"})
+            rows = db.execute("""SELECT row_json FROM bulk_input_rows r JOIN bulk_communities c ON c.job_id=r.job_id AND c.scope=r.scope AND c.account_id=r.account_id
+                WHERE r.job_id=? AND c.scope=? AND c.community_id=? ORDER BY r.row_no LIMIT ? OFFSET ?""", (job_id, cluster["scope"], cluster["community_id"], limit + 1, offset)).fetchall()
+        members = [Track1LimitTicketInput.model_validate_json(row["row_json"]).model_dump(include={"account_id", "reservation_no", "event_id"}, by_alias=True) for row in rows[:limit]]
+        return Track1BulkClusterMemberPage(jobId=job_id, clusterId=cluster_id, nextCursor=str(offset + limit) if len(rows) > limit else None, members=members)
 
 
 class Track1BulkJobService:
@@ -351,11 +384,14 @@ class Track1BulkJobService:
         manifest = self.repository.manifest(job_id)
         self.repository.transition(job_id, "RUNNING")
         try:
-            self.repository.ingest(job_id, self.store.iter_bytes(manifest.object_key, manifest.object_version), manifest)
+            await asyncio.to_thread(
+                self.repository.ingest, job_id,
+                self.store.iter_bytes(manifest.object_key, manifest.object_version), manifest,
+            )
             if self.repository.cancelled(job_id):
                 raise JobCancelled()
             algorithm = await self.graph_service.analyze_bulk_sqlite(self.repository, job_id, manifest)
-            self.repository.build_result_indexes(job_id, manifest)
+            await asyncio.to_thread(self.repository.build_result_indexes, job_id, manifest)
             self.repository.transition(job_id, "COMPLETED", algorithm=algorithm)
         except JobCancelled:
             self.repository.transition(job_id, "CANCELLED", failure="JOB_CANCELLED")

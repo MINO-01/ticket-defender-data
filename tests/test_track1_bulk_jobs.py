@@ -120,6 +120,15 @@ class BulkJobRepositoryTests(unittest.TestCase):
             self.repo.ingest(third.job_id, [out_of_scope], self.repo.manifest(third.job_id))
         self.assertEqual(raised.exception.code, "INPUT_SCOPE_MISMATCH")
 
+    def test_large_chunk_with_multiple_normal_ndjson_rows_is_accepted(self):
+        data = ndjson([row(1), row(2), row(3)])
+        accepted = self.create(data, "normal-lines-large-chunk")
+        # This boundary is intentionally below the complete chunk but above
+        # every line: the parser must enforce a row limit, not a chunk limit.
+        with patch("services.track1_bulk_jobs.MAX_NDJSON_LINE_BYTES", len(data.splitlines()[0]) + 1):
+            self.repo.ingest(accepted.job_id, [data], self.repo.manifest(accepted.job_id))
+        self.assertEqual(self.repo.status(accepted.job_id).input_record_count, 3)
+
     def test_chunk_boundary_preserves_same_account_and_shared_token(self):
         data = ndjson([row(1, account="same"), row(2, account="same"), row(3, account="other")])
         accepted = self.create(data)
@@ -191,6 +200,8 @@ class BulkJobRepositoryTests(unittest.TestCase):
         try:
             for table in (
                 "bulk_input_rows", "bulk_accounts", "bulk_token_owners", "bulk_communities", "bulk_clusters", "bulk_aux_results",
+                "bulk_shared_signal_observations", "bulk_purchase_limit_evaluations",
+                "bulk_purchase_limit_findings", "bulk_purchase_limit_reservations",
             ):
                 self.assertEqual(database.execute(f"SELECT count(*) FROM {table} WHERE job_id=?", (accepted.job_id,)).fetchone()[0], 0)
         finally:
@@ -268,6 +279,109 @@ class BulkJobRepositoryTests(unittest.TestCase):
         accepted = self.repo.create("policy-separated", manifest_value)
         self.repo.ingest(accepted.job_id, [data], manifest_value)
         self.assertEqual(self.repo.status(accepted.job_id).processed_record_count, 2)
+
+    def test_auxiliary_results_are_paged_and_keep_legacy_result_contract(self):
+        rows = []
+        for index in range(9):
+            value = row(index, account=f"shared-{index}", payment="c" * 64)
+            value.update({
+                "reservationNo": f"shared-reservation-{index}", "ticketReference": f"ticket-{index}",
+                "quantityInputType": "INDIVIDUAL_TICKET", "ticketStatus": "ACTIVE",
+                "ipHash": "b" * 64, "ipNetworkType": "CORPORATE_EDU",
+                "addressHash": "d" * 64 if index < 7 else None,
+                "deviceIdHash": "e" * 64 if index < 2 else None,
+            })
+            rows.append(value)
+        # A second ticket in the same reservation demonstrates that a repeated
+        # signal does not add a distinct owner while its proven quantity is kept.
+        extra = {**rows[0], "ticketReference": "ticket-extra", "effectiveTicketQuantity": 2}
+        rows.append(extra)
+        data = ndjson(rows)
+        accepted = self.create(data, "auxiliary-page")
+        parsed = self.repo.manifest(accepted.job_id)
+        self.repo.ingest(accepted.job_id, [data], parsed)
+        accounts = self.repo.graph_row_page(accepted.job_id, 0, 100)
+        self.repo.add_community_batch(accepted.job_id, [(item["scope"], item["account_id"], 1) for item in accounts])
+        self.repo.build_result_indexes(accepted.job_id, parsed)
+        self.repo.transition(accepted.job_id, "COMPLETED", algorithm="gds-test")
+
+        legacy = self.repo.results(accepted.job_id, None, 10, 10)
+        self.assertEqual(legacy.shared_signal_observations_status, "NOT_IMPLEMENTED")
+        self.assertEqual(legacy.purchase_limit_evaluations_status, "NOT_IMPLEMENTED")
+        observations = self.repo.shared_signal_observation_page(accepted.job_id, None, 1)
+        self.assertEqual(observations.shared_signal_observations_status, "COMPLETED")
+        self.assertIsNotNone(observations.next_cursor)
+        second_page = self.repo.shared_signal_observation_page(accepted.job_id, observations.next_cursor, 1)
+        self.assertIsNone(second_page.next_cursor)
+        ip = next(item for item in observations.shared_signal_observations + second_page.shared_signal_observations if item.signal_type == "IP")
+        self.assertEqual(ip.distinct_account_count, 9)
+        self.assertEqual(ip.total_ticket_quantity, 11)
+        self.assertEqual(ip.ticket_quantity_status, "VERIFIED")
+        self.assertTrue(ip.excluded_from_louvain)
+        self.assertEqual(ip.corroboration.payment_shared_account_count, 9)
+        self.assertEqual(ip.corroboration.device_shared_account_count, 2)
+        limits = self.repo.purchase_limit_evaluation_page(accepted.job_id, None, 10)
+        self.assertEqual(limits.purchase_limit_evaluations_status, "COMPLETED")
+        self.assertEqual(limits.purchase_limit_evaluations[0].status, "EVALUATED")
+        self.assertEqual(limits.purchase_limit_evaluations[0].account_limit_finding_count, 1)
+        findings = self.repo.purchase_limit_finding_page(accepted.job_id, PERFORMANCE, None, 1)
+        finding = findings.account_limit_findings[0]
+        self.assertEqual((finding.account_id, finding.effective_ticket_quantity), ("shared-0", 3))
+        self.assertEqual(finding.reservation_quantities[0].effective_ticket_quantity, 3)
+
+        # The bounded bulk path has the same meaning as v2 for the identical
+        # synthetic ledger; only its deterministic observation namespace differs.
+        from schemas.dto import Track1LimitAnalysisRequest
+        from services.track1_scoring import purchase_limit_evaluations, shared_signal_observations
+        small = Track1LimitAnalysisRequest.model_validate({
+            "requestId": "55555555-5555-4555-8555-555555555555",
+            "performanceScopes": [item.model_dump(by_alias=True, mode="json") for item in parsed.performance_scopes],
+            "tickets": rows,
+        })
+        small_ip = next(item for item in shared_signal_observations(small) if item.signal_type == "IP")
+        self.assertEqual(
+            (small_ip.distinct_account_count, small_ip.total_ticket_quantity, small_ip.corroboration),
+            (ip.distinct_account_count, ip.total_ticket_quantity, ip.corroboration),
+        )
+        small_limit = purchase_limit_evaluations(small)[0]
+        self.assertEqual(small_limit.status, limits.purchase_limit_evaluations[0].status)
+        self.assertEqual(small_limit.account_limit_findings, findings.account_limit_findings)
+
+    def test_auxiliary_limit_statuses_do_not_become_zero_findings(self):
+        from schemas.dto import Track1BulkArtifactManifest
+
+        second = "33333333-3333-4333-8333-333333333333"
+        third = "44444444-4444-4444-8444-444444444444"
+        provenance = {"quantityInputType": "INDIVIDUAL_TICKET", "ticketStatus": "ACTIVE", "ticketReference": "only-ticket"}
+        data = ndjson([
+            {**row(1), **provenance},
+            {**row(2, performance=second), **provenance},
+            {**row(3, performance=third), **provenance},
+        ])
+        value = manifest(data)
+        value["performanceScopes"] = [
+            {**value["performanceScopes"][0], "policyVerificationStatus": "POLICY_NOT_CONFIRMED", "policy": None},
+            {**value["performanceScopes"][0], "performanceId": second, "quantityDataStatus": "INCOMPLETE"},
+            {**value["performanceScopes"][0], "performanceId": third,
+             "policy": {"maxTicketsPerAccount": 2, "policyVersion": "late", "effectiveFrom": "2026-11-03T00:00:00Z"}},
+        ]
+        parsed = Track1BulkArtifactManifest.model_validate(value)
+        accepted = self.repo.create("auxiliary-statuses", parsed)
+        self.repo.ingest(accepted.job_id, [data], parsed)
+        self.repo.build_result_indexes(accepted.job_id, parsed)
+        self.repo.transition(accepted.job_id, "COMPLETED", algorithm="gds-test")
+        statuses = {item.performance_id: item.status for item in self.repo.purchase_limit_evaluation_page(accepted.job_id, None, 10).purchase_limit_evaluations}
+        self.assertEqual(statuses[PERFORMANCE], "POLICY_NOT_CONFIRMED")
+        self.assertEqual(statuses[second], "QUANTITY_DATA_INCOMPLETE")
+        self.assertEqual(statuses[third], "POLICY_TIME_NOT_APPLICABLE")
+
+    def test_failed_job_never_exposes_auxiliary_rows_as_completed(self):
+        data = ndjson([row(1)])
+        accepted = self.create(data, "failed-auxiliary")
+        self.repo.transition(accepted.job_id, "FAILED", failure="SYNTHETIC")
+        with self.assertRaises(Exception) as raised:
+            self.repo.shared_signal_observation_page(accepted.job_id, None, 10)
+        self.assertEqual(getattr(raised.exception, "status_code", None), 409)
 
 
 class BulkJobServiceTests(unittest.TestCase):

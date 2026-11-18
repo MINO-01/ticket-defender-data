@@ -22,9 +22,13 @@ from typing import Iterable
 from fastapi import HTTPException
 from schemas.dto import (
     Track1BulkArtifactManifest, Track1BulkClusterSummary, Track1BulkJobAccepted,
-    Track1BulkClusterMemberPage, Track1BulkJobResults, Track1BulkJobStatus, Track1LimitTicketInput,
+    Track1BulkClusterMemberPage, Track1BulkJobResults, Track1BulkJobStatus,
+    Track1BulkPurchaseLimitEvaluationPage, Track1BulkPurchaseLimitEvaluationSummary,
+    Track1BulkPurchaseLimitFindingPage, Track1BulkSharedSignalObservationPage,
+    Track1AccountLimitFinding, Track1LimitTicketInput,
+    Track1ReservationQuantity, Track1SharedSignalCorroboration, Track1SharedSignalObservation,
 )
-from services.track1_scoring import DEFAULT_PARAMETERS, SIGNALS, is_hub, score_v2
+from services.track1_scoring import DEFAULT_PARAMETERS, SIGNALS, hub_minimum_accounts, is_hub, score_v2
 
 
 STATES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "INPUT_REJECTED", "CANCELLED", "INTERRUPTED"}
@@ -155,6 +159,39 @@ class BulkJobRepository:
                   job_id TEXT PRIMARY KEY, observations_json TEXT NOT NULL, limits_json TEXT NOT NULL,
                   FOREIGN KEY(job_id) REFERENCES bulk_jobs(job_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS bulk_shared_signal_observations (
+                  job_id TEXT NOT NULL, observation_id TEXT NOT NULL, scope TEXT NOT NULL,
+                  signal TEXT NOT NULL, distinct_account_count INTEGER NOT NULL,
+                  scope_account_count INTEGER NOT NULL, distinct_reservation_count INTEGER NOT NULL,
+                  total_ticket_quantity INTEGER, ticket_quantity_status TEXT NOT NULL,
+                  payment_shared_account_count INTEGER NOT NULL, device_shared_account_count INTEGER NOT NULL,
+                  ip_network_type TEXT NOT NULL, purchase_window_seconds INTEGER,
+                  excluded_from_louvain INTEGER NOT NULL,
+                  PRIMARY KEY(job_id, observation_id),
+                  FOREIGN KEY(job_id) REFERENCES bulk_jobs(job_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_bulk_observations_page
+                  ON bulk_shared_signal_observations(job_id, observation_id);
+                CREATE TABLE IF NOT EXISTS bulk_purchase_limit_evaluations (
+                  job_id TEXT NOT NULL, scope TEXT NOT NULL, internal_event_id TEXT NOT NULL,
+                  event_id TEXT NOT NULL, performance_id TEXT NOT NULL, status TEXT NOT NULL,
+                  policy_version TEXT, PRIMARY KEY(job_id, scope),
+                  FOREIGN KEY(job_id) REFERENCES bulk_jobs(job_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS bulk_purchase_limit_findings (
+                  job_id TEXT NOT NULL, scope TEXT NOT NULL, account_id TEXT NOT NULL,
+                  effective_ticket_quantity INTEGER NOT NULL, max_tickets_per_account INTEGER NOT NULL,
+                  policy_version TEXT NOT NULL, PRIMARY KEY(job_id, scope, account_id),
+                  FOREIGN KEY(job_id, scope) REFERENCES bulk_purchase_limit_evaluations(job_id, scope) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS bulk_purchase_limit_reservations (
+                  job_id TEXT NOT NULL, scope TEXT NOT NULL, account_id TEXT NOT NULL,
+                  reservation_no TEXT NOT NULL, effective_ticket_quantity INTEGER NOT NULL,
+                  PRIMARY KEY(job_id, scope, account_id, reservation_no),
+                  FOREIGN KEY(job_id, scope, account_id) REFERENCES bulk_purchase_limit_findings(job_id, scope, account_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_bulk_limit_findings_page
+                  ON bulk_purchase_limit_findings(job_id, scope, account_id);
             """)
 
     def recover_interrupted(self) -> None:
@@ -231,7 +268,9 @@ class BulkJobRepository:
             # All job-owned mutable input/derived state is reset in this same
             # transaction.  No other job shares these rows or is touched.
             for table in (
-                "bulk_aux_results", "bulk_clusters", "bulk_communities", "bulk_token_owners", "bulk_accounts", "bulk_input_rows",
+                "bulk_purchase_limit_reservations", "bulk_purchase_limit_findings", "bulk_purchase_limit_evaluations",
+                "bulk_shared_signal_observations", "bulk_aux_results", "bulk_clusters", "bulk_communities",
+                "bulk_token_owners", "bulk_accounts", "bulk_input_rows",
             ):
                 db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
         return Track1BulkJobAccepted(jobId=job_id, status="QUEUED")
@@ -248,17 +287,24 @@ class BulkJobRepository:
             for chunk in chunks:
                 digest.update(chunk)
                 carry += chunk
-                if len(carry) > MAX_NDJSON_LINE_BYTES:
-                    raise InputRejected("INPUT_ROW_TOO_LARGE")
                 lines = carry.split(b"\n")
                 carry = lines.pop()
                 for line in lines:
+                    if len(line.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
+                        raise InputRejected("INPUT_ROW_TOO_LARGE")
                     row_no = self._ingest_line(db, job_id, line.rstrip(b"\r"), row_no, manifest, scopes)
                     if row_no % 500 == 0:
                         db.commit()
                         if self.cancelled(job_id):
                             raise JobCancelled()
+                # Only an unfinished line can remain in carry.  A large chunk
+                # containing many normal lines is valid NDJSON and must not be
+                # rejected as one oversized record.
+                if len(carry) > MAX_NDJSON_LINE_BYTES:
+                    raise InputRejected("INPUT_ROW_TOO_LARGE")
             if carry:
+                if len(carry.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
+                    raise InputRejected("INPUT_ROW_TOO_LARGE")
                 row_no = self._ingest_line(db, job_id, carry.rstrip(b"\r"), row_no, manifest, scopes)
             if digest.hexdigest() != manifest.sha256:
                 raise InputRejected("SHA256_MISMATCH")
@@ -324,6 +370,148 @@ class BulkJobRepository:
         with _connect(self.path) as db:
             db.executemany("INSERT INTO bulk_communities VALUES(?,?,?,?)", [(job_id, *row) for row in rows])
 
+    @staticmethod
+    def _scope_quantity_is_trustworthy(db, job_id: str, scope) -> bool:
+        """SQLite equivalent of the v2 quantity proof, without materializing tickets."""
+        if not scope.quantity_is_complete:
+            return False
+        summary = db.execute("""SELECT
+              count(*) AS total,
+              sum(CASE WHEN json_extract(row_json, '$.quantityInputType') IS NOT NULL THEN 1 ELSE 0 END) AS typed,
+              sum(CASE WHEN json_extract(row_json, '$.ticketStatus') IS NOT 'ACTIVE'
+                         OR json_extract(row_json, '$.sourceVersion') IS NOT ?
+                         OR json_extract(row_json, '$.sourceAsOf') IS NULL
+                         OR julianday(json_extract(row_json, '$.sourceAsOf')) > julianday(?)
+                         OR julianday(json_extract(row_json, '$.purchasedAt')) > julianday(json_extract(row_json, '$.sourceAsOf'))
+                       THEN 1 ELSE 0 END) AS invalid
+            FROM bulk_input_rows WHERE job_id=? AND scope=?""",
+            (scope.quantity_source_version, scope.quantity_as_of.isoformat().replace("+00:00", "Z"), job_id, scope.performance_id.lower()),
+        ).fetchone()
+        if summary["total"] == 0:
+            return True
+        # v2 permits entirely legacy rows with no provenance; bulk ingestion
+        # requires source provenance, so any untyped bulk row is incomplete.
+        if summary["typed"] != summary["total"] or summary["invalid"]:
+            return False
+        ambiguous = db.execute("""SELECT 1 FROM bulk_input_rows
+            WHERE job_id=? AND scope=? AND ticket_reference=''
+            GROUP BY account_id,reservation_no HAVING count(*) > 1 LIMIT 1""",
+            (job_id, scope.performance_id.lower()),
+        ).fetchone()
+        return ambiguous is None
+
+    @staticmethod
+    def _shared_corroboration(db, job_id: str, scope: str, signal: str, token: str) -> tuple[int, int]:
+        """Count only observed owners that themselves share payment/device signals."""
+        values = []
+        for corroborating_signal in ("payment_hash", "device_id_hash"):
+            row = db.execute("""SELECT count(DISTINCT owner.account_id) AS n
+                FROM bulk_token_owners owner
+                WHERE owner.job_id=? AND owner.scope=? AND owner.signal=? AND owner.token=?
+                  AND EXISTS (
+                    SELECT 1 FROM bulk_token_owners evidence
+                    WHERE evidence.job_id=owner.job_id AND evidence.scope=owner.scope
+                      AND evidence.account_id=owner.account_id AND evidence.signal=?
+                      AND (SELECT count(*) FROM bulk_token_owners peers
+                           WHERE peers.job_id=evidence.job_id AND peers.scope=evidence.scope
+                             AND peers.signal=evidence.signal AND peers.token=evidence.token) >= 2
+                  )""", (job_id, scope, signal, token, corroborating_signal)).fetchone()
+            values.append(row["n"])
+        return values[0], values[1]
+
+    def _build_auxiliary_results(self, db, job_id: str, manifest: Track1BulkArtifactManifest) -> None:
+        """Persist opt-in results atomically with the cluster result indexes."""
+        for table in (
+            "bulk_purchase_limit_reservations", "bulk_purchase_limit_findings", "bulk_purchase_limit_evaluations",
+            "bulk_shared_signal_observations", "bulk_aux_results",
+        ):
+            db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
+        account_counts = {row["scope"]: row["n"] for row in db.execute(
+            "SELECT scope,count(*) AS n FROM bulk_accounts WHERE job_id=? GROUP BY scope", (job_id,)
+        )}
+        verified_scopes = {
+            scope.performance_id.lower() for scope in manifest.performance_scopes
+            if self._scope_quantity_is_trustworthy(db, job_id, scope)
+        }
+        observed = db.execute("""SELECT scope,signal,token,count(*) AS owner_count
+            FROM bulk_token_owners WHERE job_id=? AND signal IN ('ip_hash','address_hash')
+            GROUP BY scope,signal,token ORDER BY scope,signal,token""", (job_id,))
+        for item in observed:
+            minimum = hub_minimum_accounts(item["signal"], DEFAULT_PARAMETERS)
+            if minimum is None or item["owner_count"] < minimum:
+                continue
+            scope = item["scope"]
+            json_signal = "$." + {"ip_hash": "ipHash", "address_hash": "addressHash"}[item["signal"]]
+            evidence = db.execute("""SELECT
+                  count(DISTINCT account_id || char(31) || reservation_no) AS reservation_count,
+                  sum(CAST(json_extract(row_json, '$.effectiveTicketQuantity') AS INTEGER)) AS quantity,
+                  min(julianday(json_extract(row_json, '$.purchasedAt'))) AS first_purchase,
+                  max(julianday(json_extract(row_json, '$.purchasedAt'))) AS last_purchase
+                FROM bulk_input_rows WHERE job_id=? AND scope=? AND json_extract(row_json, ?) = ?""",
+                (job_id, scope, json_signal, item["token"]),
+            ).fetchone()
+            verified = scope in verified_scopes
+            quantity = evidence["quantity"] if verified else None
+            first_purchase = evidence["first_purchase"] if verified else None
+            last_purchase = evidence["last_purchase"] if verified else None
+            networks = {
+                row["network"] for row in db.execute("""SELECT DISTINCT json_extract(row_json, '$.ipNetworkType') AS network
+                    FROM bulk_input_rows WHERE job_id=? AND scope=? AND json_extract(row_json, ?) = ? LIMIT 2""",
+                    (job_id, scope, json_signal, item["token"])
+                )
+            } if item["signal"] == "ip_hash" else {None}
+            network = next(iter(networks)) if len(networks) == 1 and None not in networks else "UNKNOWN"
+            payment_count, device_count = self._shared_corroboration(db, job_id, scope, item["signal"], item["token"])
+            identity = json.dumps([job_id, scope, item["signal"], item["token"]], separators=(",", ":"))
+            observation_id = "obs-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+            db.execute("""INSERT INTO bulk_shared_signal_observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                job_id, observation_id, scope, item["signal"], item["owner_count"], account_counts[scope],
+                evidence["reservation_count"], quantity,
+                "VERIFIED" if verified else "UNAVAILABLE", payment_count, device_count, network,
+                int((last_purchase - first_purchase) * 86_400) if first_purchase is not None and last_purchase is not None else None,
+                int(is_hub(item["signal"], item["owner_count"], DEFAULT_PARAMETERS, account_counts[scope])),
+            ))
+
+        for scope in manifest.performance_scopes:
+            scope_key, policy = scope.performance_id.lower(), scope.policy
+            status = "EVALUATED"
+            if policy is None:
+                status = "POLICY_NOT_CONFIRMED"
+            elif not self._scope_quantity_is_trustworthy(db, job_id, scope):
+                status = "QUANTITY_DATA_INCOMPLETE"
+            elif db.execute("""SELECT 1 FROM bulk_input_rows WHERE job_id=? AND scope=?
+                    AND (julianday(json_extract(row_json, '$.purchasedAt')) < julianday(?) OR
+                         (? IS NOT NULL AND julianday(json_extract(row_json, '$.purchasedAt')) >= julianday(?))) LIMIT 1""",
+                    (job_id, scope_key, policy.effective_from.isoformat().replace("+00:00", "Z"),
+                     policy.effective_until is not None,
+                     policy.effective_until.isoformat().replace("+00:00", "Z") if policy.effective_until else None),
+                ).fetchone():
+                status = "POLICY_TIME_NOT_APPLICABLE"
+            db.execute("INSERT INTO bulk_purchase_limit_evaluations VALUES(?,?,?,?,?,?,?)", (
+                job_id, scope_key, str(scope.internal_event_id), scope.event_id, str(scope.performance_id), status,
+                policy.policy_version if policy else None,
+            ))
+            if status != "EVALUATED":
+                continue
+            findings = db.execute("""SELECT account_id, sum(CAST(json_extract(row_json, '$.effectiveTicketQuantity') AS INTEGER)) AS quantity
+                FROM bulk_input_rows WHERE job_id=? AND scope=? GROUP BY account_id HAVING quantity > ?""",
+                (job_id, scope_key, policy.max_tickets_per_account),
+            )
+            for finding in findings:
+                db.execute("INSERT INTO bulk_purchase_limit_findings VALUES(?,?,?,?,?,?)", (
+                    job_id, scope_key, finding["account_id"], finding["quantity"], policy.max_tickets_per_account, policy.policy_version,
+                ))
+                reservations = db.execute("""SELECT reservation_no, sum(CAST(json_extract(row_json, '$.effectiveTicketQuantity') AS INTEGER)) AS quantity
+                    FROM bulk_input_rows WHERE job_id=? AND scope=? AND account_id=? GROUP BY reservation_no""",
+                    (job_id, scope_key, finding["account_id"]),
+                )
+                db.executemany("INSERT INTO bulk_purchase_limit_reservations VALUES(?,?,?,?,?)", (
+                    (job_id, scope_key, finding["account_id"], row["reservation_no"], row["quantity"])
+                    for row in reservations
+                ))
+        # Legacy result response deliberately remains the Backend #97 shape.
+        db.execute("INSERT INTO bulk_aux_results VALUES(?,?,?)", (job_id, "[]", "[]"))
+
     def build_result_indexes(self, job_id: str, manifest: Track1BulkArtifactManifest) -> None:
         with _connect(self.path) as db:
             for group in db.execute("SELECT scope,community_id,count(*) count FROM bulk_communities WHERE job_id=? GROUP BY scope,community_id HAVING count(*)>=2", (job_id,)):
@@ -347,8 +535,7 @@ class BulkJobRepository:
                     ticket_hash.update(str(ticket["row_no"]).encode() + b",")
                 cluster_id = "cluster-" + hashlib.sha256((job_id + group["scope"]).encode() + ticket_hash.digest()).hexdigest()
                 db.execute("INSERT INTO bulk_clusters VALUES(?,?,?,?,?,?,?)", (job_id, cluster_id, group["community_id"], group["scope"], score_v2(group["count"], coverage), group["count"], json.dumps(shared, separators=(",", ":"))))
-            # Auxiliary outputs stay explicit.  The bulk path does not invent quantity or observation facts.
-            db.execute("INSERT OR REPLACE INTO bulk_aux_results VALUES(?,?,?)", (job_id, "[]", "[]"))
+            self._build_auxiliary_results(db, job_id, manifest)
 
     def results(self, job_id: str, cursor: str | None, limit: int, member_limit: int) -> Track1BulkJobResults:
         status = self.status(job_id)
@@ -365,7 +552,83 @@ class BulkJobRepository:
                 signals = json.loads(row["signals_json"])
                 clusters.append(Track1BulkClusterSummary(clusterId=row["cluster_id"], riskScore=row["risk_score"], memberCount=row["member_count"], members=members, hasMoreMembers=len(tickets) > member_limit, paymentHashes=signals["payment_hash"], addressHashes=signals["address_hash"], deviceIdHashes=signals["device_id_hash"], ipHashes=signals["ip_hash"]))
             aux = db.execute("SELECT observations_json,limits_json FROM bulk_aux_results WHERE job_id=?", (job_id,)).fetchone()
-        return Track1BulkJobResults(jobId=job_id, status="COMPLETED", algorithmVersion=status.algorithm_version or "", nextCursor=str(offset + limit) if len(rows) > limit else None, clusters=clusters, sharedSignalObservationsStatus="NOT_IMPLEMENTED", sharedSignalObservations=json.loads(aux["observations_json"]), purchaseLimitEvaluationsStatus="NOT_IMPLEMENTED", purchaseLimitEvaluations=json.loads(aux["limits_json"]))
+        return Track1BulkJobResults(jobId=job_id, status="COMPLETED", algorithmVersion=status.algorithm_version or "", nextCursor=str(offset + limit) if len(rows) > limit else None, clusters=clusters, sharedSignalObservationsStatus="NOT_IMPLEMENTED", sharedSignalObservations=json.loads(aux["observations_json"]) if aux else [], purchaseLimitEvaluationsStatus="NOT_IMPLEMENTED", purchaseLimitEvaluations=json.loads(aux["limits_json"]) if aux else [])
+
+    def shared_signal_observation_page(self, job_id: str, cursor: str | None, limit: int) -> Track1BulkSharedSignalObservationPage:
+        status = self.status(job_id)
+        if status.status != "COMPLETED":
+            raise HTTPException(409, detail={"code": "RESULT_NOT_AVAILABLE", "status": status.status})
+        offset = int(cursor or 0)
+        with _connect(self.path) as db:
+            rows = db.execute("""SELECT * FROM bulk_shared_signal_observations WHERE job_id=?
+                ORDER BY observation_id LIMIT ? OFFSET ?""", (job_id, limit + 1, offset)).fetchall()
+        observations = [Track1SharedSignalObservation(
+            observationId=row["observation_id"], scopeType="PERFORMANCE", scopeId=row["scope"],
+            signalType="IP" if row["signal"] == "ip_hash" else "ADDRESS",
+            distinctAccountCount=row["distinct_account_count"], scopeAccountCount=row["scope_account_count"],
+            distinctReservationCount=row["distinct_reservation_count"], totalTicketQuantity=row["total_ticket_quantity"],
+            ticketQuantityStatus=row["ticket_quantity_status"],
+            corroboration=Track1SharedSignalCorroboration(
+                paymentSharedAccountCount=row["payment_shared_account_count"],
+                deviceSharedAccountCount=row["device_shared_account_count"],
+            ), ipNetworkType=row["ip_network_type"], purchaseWindowSeconds=row["purchase_window_seconds"],
+            excludedFromLouvain=bool(row["excluded_from_louvain"]),
+        ) for row in rows[:limit]]
+        return Track1BulkSharedSignalObservationPage(
+            jobId=job_id, status="COMPLETED", nextCursor=str(offset + limit) if len(rows) > limit else None,
+            sharedSignalObservationsStatus="COMPLETED", sharedSignalObservations=observations,
+        )
+
+    def purchase_limit_evaluation_page(self, job_id: str, cursor: str | None, limit: int) -> Track1BulkPurchaseLimitEvaluationPage:
+        status = self.status(job_id)
+        if status.status != "COMPLETED":
+            raise HTTPException(409, detail={"code": "RESULT_NOT_AVAILABLE", "status": status.status})
+        offset = int(cursor or 0)
+        with _connect(self.path) as db:
+            rows = db.execute("""SELECT * FROM bulk_purchase_limit_evaluations WHERE job_id=?
+                ORDER BY scope LIMIT ? OFFSET ?""", (job_id, limit + 1, offset)).fetchall()
+            evaluations = []
+            for row in rows[:limit]:
+                finding_count = db.execute("""SELECT count(*) FROM bulk_purchase_limit_findings
+                    WHERE job_id=? AND scope=?""", (job_id, row["scope"])).fetchone()[0]
+                evaluations.append(Track1BulkPurchaseLimitEvaluationSummary(
+                    internalEventId=row["internal_event_id"], eventId=row["event_id"], performanceId=row["performance_id"],
+                    status=row["status"], policyVersion=row["policy_version"], accountLimitFindingCount=finding_count,
+                ))
+        return Track1BulkPurchaseLimitEvaluationPage(
+            jobId=job_id, status="COMPLETED", nextCursor=str(offset + limit) if len(rows) > limit else None,
+            purchaseLimitEvaluationsStatus="COMPLETED", purchaseLimitEvaluations=evaluations,
+        )
+
+    def purchase_limit_finding_page(self, job_id: str, performance_id: str, cursor: str | None, limit: int) -> Track1BulkPurchaseLimitFindingPage:
+        status = self.status(job_id)
+        if status.status != "COMPLETED":
+            raise HTTPException(409, detail={"code": "RESULT_NOT_AVAILABLE", "status": status.status})
+        offset = int(cursor or 0)
+        with _connect(self.path) as db:
+            evaluation = db.execute("""SELECT * FROM bulk_purchase_limit_evaluations
+                WHERE job_id=? AND lower(performance_id)=lower(?)""", (job_id, performance_id)).fetchone()
+            if not evaluation:
+                raise HTTPException(404, detail={"code": "PERFORMANCE_NOT_FOUND"})
+            rows = db.execute("""SELECT * FROM bulk_purchase_limit_findings WHERE job_id=? AND scope=?
+                ORDER BY account_id LIMIT ? OFFSET ?""", (job_id, evaluation["scope"], limit + 1, offset)).fetchall()
+            findings = []
+            for finding in rows[:limit]:
+                reservations = db.execute("""SELECT reservation_no,effective_ticket_quantity
+                    FROM bulk_purchase_limit_reservations WHERE job_id=? AND scope=? AND account_id=?
+                    ORDER BY reservation_no""", (job_id, evaluation["scope"], finding["account_id"])).fetchall()
+                findings.append(Track1AccountLimitFinding(
+                    accountId=finding["account_id"], effectiveTicketQuantity=finding["effective_ticket_quantity"],
+                    maxTicketsPerAccount=finding["max_tickets_per_account"], policyVersion=finding["policy_version"],
+                    reservationQuantities=[Track1ReservationQuantity(
+                        reservationNo=item["reservation_no"], effectiveTicketQuantity=item["effective_ticket_quantity"],
+                    ) for item in reservations],
+                ))
+        return Track1BulkPurchaseLimitFindingPage(
+            jobId=job_id, performanceId=evaluation["performance_id"], status="COMPLETED",
+            nextCursor=str(offset + limit) if len(rows) > limit else None,
+            evaluationStatus=evaluation["status"], policyVersion=evaluation["policy_version"], accountLimitFindings=findings,
+        )
 
     def member_page(self, job_id: str, cluster_id: str, cursor: str | None, limit: int) -> Track1BulkClusterMemberPage:
         status = self.status(job_id)

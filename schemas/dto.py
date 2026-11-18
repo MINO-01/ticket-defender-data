@@ -430,6 +430,55 @@ class Track1BulkJobResults(BaseModel):
     purchase_limit_evaluations: List[Track1PurchaseLimitEvaluation] = Field(alias="purchaseLimitEvaluations")
 
 
+class Track1BulkSharedSignalObservationPage(BaseModel):
+    """Opt-in bulk auxiliary result; this is separate from the Backend #97 contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    status: Literal["COMPLETED"]
+    next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+    shared_signal_observations_status: Literal["COMPLETED"] = Field(alias="sharedSignalObservationsStatus")
+    shared_signal_observations: List[Track1SharedSignalObservation] = Field(alias="sharedSignalObservations")
+
+
+class Track1BulkPurchaseLimitEvaluationPage(BaseModel):
+    """Opt-in bulk auxiliary result; each performance retains its evaluation status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    status: Literal["COMPLETED"]
+    next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+    purchase_limit_evaluations_status: Literal["COMPLETED"] = Field(alias="purchaseLimitEvaluationsStatus")
+    purchase_limit_evaluations: List["Track1BulkPurchaseLimitEvaluationSummary"] = Field(alias="purchaseLimitEvaluations")
+
+
+class Track1BulkPurchaseLimitEvaluationSummary(BaseModel):
+    """A bounded evaluation listing; findings use their own cursor endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    internal_event_id: UUIDText = Field(alias="internalEventId")
+    event_id: TicketIdentifier = Field(alias="eventId")
+    performance_id: UUIDText = Field(alias="performanceId")
+    status: Literal["EVALUATED", "POLICY_NOT_CONFIRMED", "QUANTITY_DATA_INCOMPLETE", "POLICY_TIME_NOT_APPLICABLE"]
+    policy_version: Optional[PolicyVersion] = Field(alias="policyVersion")
+    account_limit_finding_count: int = Field(ge=0, alias="accountLimitFindingCount")
+
+
+class Track1BulkPurchaseLimitFindingPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    performance_id: UUIDText = Field(alias="performanceId")
+    status: Literal["COMPLETED"]
+    next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+    evaluation_status: Literal["EVALUATED", "POLICY_NOT_CONFIRMED", "QUANTITY_DATA_INCOMPLETE", "POLICY_TIME_NOT_APPLICABLE"] = Field(alias="evaluationStatus")
+    policy_version: Optional[PolicyVersion] = Field(alias="policyVersion")
+    account_limit_findings: List[Track1AccountLimitFinding] = Field(alias="accountLimitFindings")
+
+
 class Track1BulkClusterMemberPage(BaseModel):
     """A bounded page of one cluster's ticket identifiers."""
 

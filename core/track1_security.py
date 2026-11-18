@@ -17,6 +17,7 @@ TRACK1_SECRET_ENV = "TRACK1_INTERNAL_SHARED_SECRET"
 TRACK2_SECRET_ENV = "VLM_INTERNAL_SHARED_SECRET"
 TRACK1_MIN_SECRET_BYTES = 32
 TRACK1_PROTECTED_PATHS = frozenset({"/api/v1/clusters/analyze", "/api/v2/clusters/analyze"})
+TRACK1_PROTECTED_PREFIXES = ("/api/v2/clusters/jobs",)
 
 
 def _is_protected(scope) -> bool:
@@ -26,7 +27,11 @@ def _is_protected(scope) -> bool:
     candidates = {path}
     if root_path and path.startswith(root_path + "/"):
         candidates.add(path[len(root_path):])
-    return any(candidate.rstrip("/") in TRACK1_PROTECTED_PATHS for candidate in candidates)
+    return any(
+        candidate.rstrip("/") in TRACK1_PROTECTED_PATHS
+        or any(candidate.rstrip("/").startswith(prefix) for prefix in TRACK1_PROTECTED_PREFIXES)
+        for candidate in candidates
+    )
 
 
 def _configured_secret() -> bytes | None:

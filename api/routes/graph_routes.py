@@ -1,17 +1,19 @@
 import logging
 from typing import Awaitable, TypeVar
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from neo4j.exceptions import AuthError, Neo4jError, ServiceUnavailable, SessionExpired
 from schemas.dto import (
     Track1AnalysisRequest, Track1AnalysisResponse, Track1LimitAnalysisRequest, Track1LimitAnalysisResponse,
+    Track1BulkClusterMemberPage, Track1BulkJobCreateRequest, Track1BulkJobAccepted, Track1BulkJobResults, Track1BulkJobStatus,
 )
-from core.dependencies import get_graph_service
+from core.dependencies import get_graph_service, get_track1_bulk_job_service
 from services.graph_service import GraphAnalysisUnavailable, GraphResultInvalid, GraphService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/clusters", tags=["Track 1 (Macro)"])
 v2_router = APIRouter(prefix="/clusters", tags=["Track 1 (Purchase limit)"])
+bulk_router = APIRouter(prefix="/clusters/jobs", tags=["Track 1 (Bulk analysis jobs)"])
 
 AnalysisResult = TypeVar("AnalysisResult")
 
@@ -52,6 +54,53 @@ async def analyze_louvain_clusters_with_limits(
     graph_service: GraphService = Depends(get_graph_service),
 ):
     return await _run_analysis(graph_service.analyze_louvain_with_limits(request))
+
+
+@bulk_router.post("", response_model=Track1BulkJobAccepted, status_code=202)
+async def create_bulk_analysis_job(
+    request: Track1BulkJobCreateRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=128),
+    service=Depends(get_track1_bulk_job_service),
+):
+    """Register a fixed private NDJSON artifact; ticket rows are never read from this HTTP body."""
+    return service.submit(request, idempotency_key)
+
+
+@bulk_router.get("/{job_id}", response_model=Track1BulkJobStatus)
+async def get_bulk_analysis_job(job_id: str, service=Depends(get_track1_bulk_job_service)):
+    return service.repository.status(job_id)
+
+
+@bulk_router.post("/{job_id}/retry", response_model=Track1BulkJobAccepted, status_code=202)
+async def retry_bulk_analysis_job(job_id: str, service=Depends(get_track1_bulk_job_service)):
+    return service.retry(job_id)
+
+
+@bulk_router.post("/{job_id}/cancel", response_model=Track1BulkJobStatus, status_code=202)
+async def cancel_bulk_analysis_job(job_id: str, service=Depends(get_track1_bulk_job_service)):
+    return service.repository.cancel(job_id)
+
+
+@bulk_router.get("/{job_id}/results", response_model=Track1BulkJobResults)
+async def get_bulk_analysis_results(
+    job_id: str,
+    cursor: str | None = Query(default=None, pattern=r"^\d+$"),
+    limit: int = Query(default=20, ge=1, le=100),
+    member_limit: int = Query(default=100, ge=1, le=500),
+    service=Depends(get_track1_bulk_job_service),
+):
+    return service.repository.results(job_id, cursor, limit, member_limit)
+
+
+@bulk_router.get("/{job_id}/results/{cluster_id}/members", response_model=Track1BulkClusterMemberPage)
+async def get_bulk_cluster_members(
+    job_id: str,
+    cluster_id: str,
+    cursor: str | None = Query(default=None, pattern=r"^\d+$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    service=Depends(get_track1_bulk_job_service),
+):
+    return service.repository.member_page(job_id, cluster_id, cursor, limit)
 
 
 @router.post("/macro", include_in_schema=False)

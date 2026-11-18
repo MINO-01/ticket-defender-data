@@ -1,12 +1,14 @@
 import os
 import logging
 import asyncio
+from pathlib import Path
 from fastapi import HTTPException
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from services.graph_service import GraphService
+from services.track1_bulk_jobs import BulkJobRepository, S3PrivateObjectStore, Track1BulkJobService
 from services.vlm_service import VLMService
 from services.vlm_service import GeminiProvider
 from core.vlm_errors import VLMProblem
@@ -15,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _graph_service_instance = None
 _vlm_service_instance = None
+_track1_bulk_job_instance = None
 _lock = asyncio.Lock()
 
 async def get_graph_service() -> GraphService:
@@ -76,3 +79,19 @@ async def get_vlm_service() -> VLMService:
                     logger.error("VLM provider configuration invalid: %s", type(error).__name__)
                     raise VLMProblem(503, "VLM_CONFIGURATION_ERROR", "Analysis unavailable", "Model configuration is unavailable") from None
     return _vlm_service_instance
+
+
+async def get_track1_bulk_job_service() -> Track1BulkJobService:
+    """Create a durable job coordinator only when the bulk endpoint is used."""
+    global _track1_bulk_job_instance
+    if _track1_bulk_job_instance is None:
+        graph_service = await get_graph_service()
+        async with _lock:
+            if _track1_bulk_job_instance is None:
+                database = os.getenv("TRACK1_BULK_STATE_DB", "runtime/track1-bulk-jobs.sqlite3")
+                repository = BulkJobRepository(Path(database))
+                repository.recover_interrupted()
+                _track1_bulk_job_instance = Track1BulkJobService(
+                    repository, S3PrivateObjectStore(), graph_service,
+                )
+    return _track1_bulk_job_instance

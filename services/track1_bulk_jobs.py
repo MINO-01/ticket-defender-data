@@ -95,9 +95,10 @@ def _now() -> str:
 
 @contextmanager
 def _connect(path: Path):
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA busy_timeout=10000")
     try:
         yield connection
         connection.commit()
@@ -169,11 +170,25 @@ class BulkJobRepository:
                 if existing["fingerprint"] != fingerprint:
                     raise HTTPException(409, detail={"code": "IDEMPOTENCY_CONFLICT"})
                 return Track1BulkJobAccepted(jobId=existing["job_id"], status=existing["status"], existing=True)
-            duplicate = db.execute("SELECT job_id, status FROM bulk_jobs WHERE fingerprint=? AND status NOT IN ('FAILED','INPUT_REJECTED','CANCELLED')", (fingerprint,)).fetchone()
+            # A fixed input maps to exactly one durable job.  A failed job is
+            # deliberately returned too: callers must use that job's retry API
+            # instead of creating a second job for the same immutable artifact.
+            duplicate = db.execute("SELECT job_id, status FROM bulk_jobs WHERE fingerprint=?", (fingerprint,)).fetchone()
             if duplicate:
                 return Track1BulkJobAccepted(jobId=duplicate["job_id"], status=duplicate["status"], existing=True)
             job_id, now = str(uuid.uuid4()), _now()
-            db.execute("INSERT INTO bulk_jobs(job_id,idempotency_key,manifest_json,fingerprint,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (job_id, idempotency_key, json.dumps(payload, separators=(",", ":")), fingerprint, "QUEUED", now, now))
+            try:
+                db.execute("INSERT INTO bulk_jobs(job_id,idempotency_key,manifest_json,fingerprint,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (job_id, idempotency_key, json.dumps(payload, separators=(",", ":")), fingerprint, "QUEUED", now, now))
+            except sqlite3.IntegrityError:
+                # Another request may have inserted the same fingerprint after
+                # this transaction read it.  Resolve it deterministically.
+                duplicate = db.execute("SELECT job_id, status FROM bulk_jobs WHERE fingerprint=?", (fingerprint,)).fetchone()
+                if duplicate:
+                    return Track1BulkJobAccepted(jobId=duplicate["job_id"], status=duplicate["status"], existing=True)
+                existing = db.execute("SELECT fingerprint FROM bulk_jobs WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+                if existing and existing["fingerprint"] != fingerprint:
+                    raise HTTPException(409, detail={"code": "IDEMPOTENCY_CONFLICT"}) from None
+                raise
             return Track1BulkJobAccepted(jobId=job_id, status="QUEUED")
 
     def status(self, job_id: str) -> Track1BulkJobStatus:
@@ -204,12 +219,21 @@ class BulkJobRepository:
         return self.status(job_id)
 
     def retry(self, job_id: str) -> Track1BulkJobAccepted:
-        state = self.status(job_id)
-        if state.status not in {"FAILED", "INPUT_REJECTED", "CANCELLED", "INTERRUPTED"}:
-            raise HTTPException(409, detail={"code": "JOB_NOT_RETRYABLE"})
         with _connect(self.path) as db:
-            db.execute("DELETE FROM bulk_input_rows WHERE job_id=?", (job_id,))
-            db.execute("UPDATE bulk_jobs SET status='QUEUED', failure_code=NULL, cancel_requested=0, input_record_count=0, processed_record_count=0, updated_at=? WHERE job_id=?", (_now(), job_id))
+            current = db.execute("SELECT status FROM bulk_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if not current:
+                raise HTTPException(404, detail={"code": "JOB_NOT_FOUND"})
+            changed = db.execute("""UPDATE bulk_jobs
+                SET status='QUEUED', failure_code=NULL, cancel_requested=0, input_record_count=0, processed_record_count=0, updated_at=?
+                WHERE job_id=? AND status IN ('FAILED','INPUT_REJECTED','CANCELLED','INTERRUPTED')""", (_now(), job_id)).rowcount
+            if changed != 1:
+                raise HTTPException(409, detail={"code": "JOB_NOT_RETRYABLE"})
+            # All job-owned mutable input/derived state is reset in this same
+            # transaction.  No other job shares these rows or is touched.
+            for table in (
+                "bulk_aux_results", "bulk_clusters", "bulk_communities", "bulk_token_owners", "bulk_accounts", "bulk_input_rows",
+            ):
+                db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
         return Track1BulkJobAccepted(jobId=job_id, status="QUEUED")
 
     def cancelled(self, job_id: str) -> bool:
@@ -255,14 +279,8 @@ class BulkJobRepository:
             raise InputRejected("INPUT_SCOPE_MISMATCH")
         if ticket.source_version != manifest.source_version or ticket.source_as_of != manifest.source_as_of:
             raise InputRejected("INPUT_SOURCE_MISMATCH")
-        if (
-            scope.quantity_source_version != manifest.source_version
-            or scope.quantity_as_of != manifest.source_as_of
-            or scope.policy_verification_status != "CONFIRMED"
-            or scope.policy is None
-            or scope.policy.policy_version != manifest.policy_version
-        ):
-            raise InputRejected("INPUT_POLICY_OR_SCOPE_PROVENANCE_MISMATCH")
+        if scope.quantity_source_version != manifest.source_version or scope.quantity_as_of != manifest.source_as_of:
+            raise InputRejected("INPUT_SCOPE_PROVENANCE_MISMATCH")
         row_no += 1
         try:
             db.execute("INSERT INTO bulk_input_rows VALUES(?,?,?,?,?,?,?)", (job_id, row_no, ticket.analysis_scope, ticket.account_id, ticket.reservation_no, ticket.ticket_reference or "", json.dumps(ticket.model_dump(mode="json", by_alias=True), separators=(",", ":"))))

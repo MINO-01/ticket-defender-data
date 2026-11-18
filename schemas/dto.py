@@ -364,18 +364,14 @@ class Track1BulkArtifactManifest(BaseModel):
             raise PydanticCustomError("INVALID_ARTIFACT_REFERENCE", "objectKey must be an opaque object name")
         if any(scope.event_id != self.event_id for scope in self.performance_scopes):
             raise PydanticCustomError("MANIFEST_SCOPE_MISMATCH", "performance scopes must match manifest event")
-        for scope in self.performance_scopes:
-            if (
-                scope.policy_verification_status != "CONFIRMED"
-                or scope.policy is None
-                or scope.policy.policy_version != self.policy_version
-                or scope.quantity_source_version != self.source_version
-                or scope.quantity_as_of != self.source_as_of
-            ):
-                raise PydanticCustomError(
-                    "MANIFEST_PROVENANCE_MISMATCH",
-                    "performance scope policy and source metadata must match manifest",
-                )
+        if any(
+            scope.quantity_source_version != self.source_version or scope.quantity_as_of != self.source_as_of
+            for scope in self.performance_scopes
+        ):
+            raise PydanticCustomError(
+                "MANIFEST_SOURCE_MISMATCH",
+                "performance scope source metadata must match manifest",
+            )
         return self
 
 

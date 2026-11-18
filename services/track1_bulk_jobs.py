@@ -398,24 +398,40 @@ class BulkJobRepository:
             GROUP BY account_id,reservation_no HAVING count(*) > 1 LIMIT 1""",
             (job_id, scope.performance_id.lower()),
         ).fetchone()
-        return ambiguous is None
+        if ambiguous is not None:
+            return False
+        # Match v2's reservation_of_reference proof: a ticket reference must
+        # identify one account/reservation pair within its performance.
+        cross_owner_reference = db.execute("""SELECT 1 FROM (
+                SELECT ticket_reference,account_id,reservation_no FROM bulk_input_rows
+                WHERE job_id=? AND scope=? AND ticket_reference<>''
+                GROUP BY ticket_reference,account_id,reservation_no
+            ) references_by_owner
+            GROUP BY ticket_reference HAVING count(*) > 1 LIMIT 1""",
+            (job_id, scope.performance_id.lower()),
+        ).fetchone()
+        return cross_owner_reference is None
 
     @staticmethod
     def _shared_corroboration(db, job_id: str, scope: str, signal: str, token: str) -> tuple[int, int]:
         """Count only observed owners that themselves share payment/device signals."""
         values = []
         for corroborating_signal in ("payment_hash", "device_id_hash"):
-            row = db.execute("""SELECT count(DISTINCT owner.account_id) AS n
-                FROM bulk_token_owners owner
-                WHERE owner.job_id=? AND owner.scope=? AND owner.signal=? AND owner.token=?
-                  AND EXISTS (
-                    SELECT 1 FROM bulk_token_owners evidence
-                    WHERE evidence.job_id=owner.job_id AND evidence.scope=owner.scope
-                      AND evidence.account_id=owner.account_id AND evidence.signal=?
-                      AND (SELECT count(*) FROM bulk_token_owners peers
-                           WHERE peers.job_id=evidence.job_id AND peers.scope=evidence.scope
-                             AND peers.signal=evidence.signal AND peers.token=evidence.token) >= 2
-                  )""", (job_id, scope, signal, token, corroborating_signal)).fetchone()
+            row = db.execute("""WITH observed_accounts AS (
+                    SELECT account_id FROM bulk_token_owners
+                    WHERE job_id=? AND scope=? AND signal=? AND token=?
+                ), shared_observed_tokens AS (
+                    SELECT evidence.token FROM bulk_token_owners evidence
+                    JOIN observed_accounts observed ON observed.account_id=evidence.account_id
+                    WHERE evidence.job_id=? AND evidence.scope=? AND evidence.signal=?
+                    GROUP BY evidence.token HAVING count(DISTINCT evidence.account_id) >= 2
+                )
+                SELECT count(DISTINCT evidence.account_id) AS n FROM bulk_token_owners evidence
+                JOIN observed_accounts observed ON observed.account_id=evidence.account_id
+                JOIN shared_observed_tokens shared ON shared.token=evidence.token
+                WHERE evidence.job_id=? AND evidence.scope=? AND evidence.signal=?""",
+                (job_id, scope, signal, token, job_id, scope, corroborating_signal,
+                 job_id, scope, corroborating_signal)).fetchone()
             values.append(row["n"])
         return values[0], values[1]
 

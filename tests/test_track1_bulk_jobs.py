@@ -375,6 +375,61 @@ class BulkJobRepositoryTests(unittest.TestCase):
         self.assertEqual(statuses[second], "QUANTITY_DATA_INCOMPLETE")
         self.assertEqual(statuses[third], "POLICY_TIME_NOT_APPLICABLE")
 
+    def test_ticket_reference_must_not_cross_account_or_reservation_for_quantity_proof(self):
+        from schemas.dto import Track1BulkArtifactManifest
+
+        provenance = {"quantityInputType": "INDIVIDUAL_TICKET", "ticketStatus": "ACTIVE", "ticketReference": "same-ticket"}
+        data = ndjson([
+            {**row(1, account="account-a"), "reservationNo": "reservation-a", **provenance},
+            {**row(2, account="account-b"), "reservationNo": "reservation-b", **provenance},
+        ])
+        parsed = Track1BulkArtifactManifest.model_validate(manifest(data))
+        accepted = self.repo.create("ticket-reference-cross-owner", parsed)
+        self.repo.ingest(accepted.job_id, [data], parsed)
+        self.repo.build_result_indexes(accepted.job_id, parsed)
+        self.repo.transition(accepted.job_id, "COMPLETED", algorithm="gds-test")
+        evaluation = self.repo.purchase_limit_evaluation_page(accepted.job_id, None, 10).purchase_limit_evaluations[0]
+        self.assertEqual(evaluation.status, "QUANTITY_DATA_INCOMPLETE")
+        self.assertEqual(evaluation.account_limit_finding_count, 0)
+
+    def test_corroboration_excludes_accounts_outside_the_observed_signal_set(self):
+        from schemas.dto import Track1BulkArtifactManifest, Track1LimitAnalysisRequest
+        from services.track1_scoring import shared_signal_observations
+
+        provenance = {"quantityInputType": "INDIVIDUAL_TICKET", "ticketStatus": "ACTIVE"}
+        rows = []
+        for index in range(9):
+            rows.append({
+                **row(index, account=f"observed-{index}", payment=f"{index:x}" * 64), **provenance,
+                "ticketReference": f"observed-ticket-{index}", "ipHash": "b" * 64,
+                "deviceIdHash": f"{index:x}" * 64,
+            })
+        # These payment/device tokens are shared only with an account outside
+        # the IP observation.  They must not corroborate that observation.
+        rows[0]["paymentHash"] = "c" * 64
+        rows[0]["deviceIdHash"] = "d" * 64
+        rows.append({
+            **row(99, account="outside", payment="c" * 64), **provenance,
+            "ticketReference": "outside-ticket", "ipHash": "e" * 64, "deviceIdHash": "d" * 64,
+        })
+        data = ndjson(rows)
+        parsed = Track1BulkArtifactManifest.model_validate(manifest(data))
+        accepted = self.repo.create("corroboration-observed-set", parsed)
+        self.repo.ingest(accepted.job_id, [data], parsed)
+        self.repo.build_result_indexes(accepted.job_id, parsed)
+        self.repo.transition(accepted.job_id, "COMPLETED", algorithm="gds-test")
+        pages = [self.repo.shared_signal_observation_page(accepted.job_id, None, 10)]
+        bulk_ip = next(item for item in pages[0].shared_signal_observations if item.signal_type == "IP")
+        self.assertEqual((bulk_ip.corroboration.payment_shared_account_count, bulk_ip.corroboration.device_shared_account_count), (0, 0))
+
+        small = Track1LimitAnalysisRequest.model_validate({
+            "requestId": "55555555-5555-4555-8555-555555555556",
+            "performanceScopes": [item.model_dump(by_alias=True, mode="json") for item in parsed.performance_scopes],
+            "tickets": rows,
+        })
+        small_ip = next(item for item in shared_signal_observations(small) if item.signal_type == "IP")
+        self.assertEqual(small_ip.corroboration, bulk_ip.corroboration)
+
     def test_failed_job_never_exposes_auxiliary_rows_as_completed(self):
         data = ndjson([row(1)])
         accepted = self.create(data, "failed-auxiliary")

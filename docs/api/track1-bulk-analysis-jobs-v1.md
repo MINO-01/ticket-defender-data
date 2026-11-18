@@ -21,7 +21,9 @@ OpenAPI는 FastAPI `/openapi.json`에서 위 DTO(`Track1Bulk*`)로 생성된다.
 
 `manifest`는 `artifactId`, opaque `objectKey`, `objectVersion`, `sha256`, `recordCount`, `inputFormatVersion=track1-limit-ndjson-v1`, `tenantId`, `eventId`, ledger `version/generation/revision`, `sourceVersion/sourceAsOf`, `hmacPurpose/hmacKeyVersion`, `policyVersion`, `performanceScopes`를 가진다.
 
-입력 객체는 UTF-8 NDJSON이며 각 줄은 기존 Track 1 v2 `Track1LimitTicketInput` 한 행이다. 각 행의 `performanceId/eventId`, `sourceVersion/sourceAsOf`는 manifest 및 해당 `performanceScope`와 정확히 같아야 한다. scope는 `CONFIRMED` 정책과 같은 `policyVersion` 및 source metadata를 가져야 한다. Data는 configured S3-compatible bucket 및 prefix 아래의 `objectKey`만 읽고 `head_object`의 version과 manifest `objectVersion`이 같을 때만 읽는다. 다운로드하면서 SHA-256, 줄 수, 중복 ticket row, event/performance scope·출처를 검증한다. 어느 하나라도 실패하면 `INPUT_REJECTED`다.
+입력 객체는 UTF-8 NDJSON이며 각 줄은 기존 Track 1 v2 `Track1LimitTicketInput` 한 행이다. 각 행의 `performanceId/eventId`, `sourceVersion/sourceAsOf`는 manifest 및 해당 `performanceScope`와 정확히 같아야 한다. `performanceScopes`도 동일 source metadata를 가져야 한다. Data는 configured S3-compatible bucket 및 prefix 아래의 `objectKey`만 읽고 `head_object`의 version과 manifest `objectVersion`이 같을 때만 읽는다. 다운로드하면서 SHA-256, 줄 수, 중복 ticket row, event/performance scope·출처를 검증한다. 어느 하나라도 실패하면 `INPUT_REJECTED`다.
+
+`policyVersion`은 manifest 수준의 정책 snapshot/bundle 식별자다. 관계 그래프 분석은 `POLICY_NOT_CONFIRMED` 또는 scope별 서로 다른 confirmed policy version 때문에 차단하지 않는다. 구매 한도 평가는 독립 결과이며 현재 `NOT_IMPLEMENTED`다. 따라서 Back-end는 확정되지 않은 정책을 확정으로 승격하거나 기본 한도를 만들지 않는다.
 
 필수 환경 변수는 `TRACK1_BULK_STATE_DB`, `TRACK1_BULK_S3_BUCKET`, `TRACK1_BULK_S3_PREFIX`, `TRACK1_BULK_S3_ENDPOINT`다. S3 credentials는 SDK 기본 credential chain에서만 읽는다. `TRACK1_BULK_MAX_PROJECTED_EDGES`(기본 5,000,000)는 투영 상한이며 초과는 `GDS_RESOURCE_EXHAUSTED` 실패다.
 

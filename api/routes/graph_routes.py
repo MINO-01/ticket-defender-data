@@ -6,6 +6,7 @@ from neo4j.exceptions import AuthError, Neo4jError, ServiceUnavailable, SessionE
 from schemas.dto import (
     Track1AnalysisRequest, Track1AnalysisResponse, Track1LimitAnalysisRequest, Track1LimitAnalysisResponse,
     Track1BulkClusterMemberPage, Track1BulkJobCreateRequest, Track1BulkJobAccepted, Track1BulkJobResults, Track1BulkJobStatus,
+    Track1BulkPurchaseLimitEvaluationPage, Track1BulkPurchaseLimitFindingPage, Track1BulkSharedSignalObservationPage,
 )
 from core.dependencies import get_graph_service, get_track1_bulk_job_service
 from services.graph_service import GraphAnalysisUnavailable, GraphResultInvalid, GraphService
@@ -101,6 +102,40 @@ async def get_bulk_cluster_members(
     service=Depends(get_track1_bulk_job_service),
 ):
     return service.repository.member_page(job_id, cluster_id, cursor, limit)
+
+
+@bulk_router.get("/{job_id}/auxiliary/shared-signal-observations", response_model=Track1BulkSharedSignalObservationPage)
+async def get_bulk_shared_signal_observations(
+    job_id: str,
+    cursor: str | None = Query(default=None, pattern=r"^\d+$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    service=Depends(get_track1_bulk_job_service),
+):
+    """Opt-in v2 extension; deliberately not consumed by the legacy bulk results route."""
+    return service.repository.shared_signal_observation_page(job_id, cursor, limit)
+
+
+@bulk_router.get("/{job_id}/auxiliary/purchase-limit-evaluations", response_model=Track1BulkPurchaseLimitEvaluationPage)
+async def get_bulk_purchase_limit_evaluations(
+    job_id: str,
+    cursor: str | None = Query(default=None, pattern=r"^\d+$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    service=Depends(get_track1_bulk_job_service),
+):
+    """Opt-in v2 extension; performance statuses are not collapsed into zero findings."""
+    return service.repository.purchase_limit_evaluation_page(job_id, cursor, limit)
+
+
+@bulk_router.get("/{job_id}/auxiliary/purchase-limit-evaluations/{performance_id}/findings", response_model=Track1BulkPurchaseLimitFindingPage)
+async def get_bulk_purchase_limit_findings(
+    job_id: str,
+    performance_id: str,
+    cursor: str | None = Query(default=None, pattern=r"^\d+$"),
+    limit: int = Query(default=100, ge=1, le=500),
+    service=Depends(get_track1_bulk_job_service),
+):
+    """Page account findings for one evaluated performance without loading all findings."""
+    return service.repository.purchase_limit_finding_page(job_id, performance_id, cursor, limit)
 
 
 @router.post("/macro", include_in_schema=False)

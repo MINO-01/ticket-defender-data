@@ -15,6 +15,7 @@ from services.graph_service import GraphAnalysisUnavailable, GraphResultInvalid
 
 
 ANALYZE = "/api/v1/clusters/analyze"
+MULTI_EVENT_ANALYZE = "/api/v2/multi-event/analyze"
 MACRO = "/api/v1/clusters/macro"
 VLM_PATH = "/api/v1/parse/ticket-image"
 TRACK1_KEY = "track1-synthetic-key-" + "k" * 24
@@ -128,6 +129,13 @@ class Track1InternalAuthTests(unittest.TestCase):
         with TestClient(app, root_path="/td") as client:
             response = client.post(ANALYZE, json=PAYLOAD)
         self.assertEqual(response.status_code, 401)
+        self.assert_graph_untouched()
+
+    def test_multi_event_path_is_gated_before_body_validation(self):
+        response = self.client.post(MULTI_EVENT_ANALYZE, content="{", headers={"content-type": "application/json"})
+        self.assertEqual(response.status_code, 401)
+        response = self.client.post(MULTI_EVENT_ANALYZE, json={}, headers={"X-TD-Track1-Key": TRACK1_KEY})
+        self.assertEqual(response.status_code, 422)
         self.assert_graph_untouched()
 
     def test_missing_short_or_shared_secret_fails_closed_with_503(self):

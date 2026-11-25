@@ -16,6 +16,7 @@ from services.track1_scoring import (
     shared_signal_observations,
 )
 from services.track1_bulk_jobs import GdsResourceExhausted, JobCancelled
+from services.track1_scoring_exp2 import build_account_token_graph_exp2, PROJECTION_VERSION_EXP2, SCORE_VERSION_EXP2
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,86 @@ class GraphService:
             sharedSignalObservations=analysis.shared_signal_observations,
             purchaseLimitEvaluations=purchase_limit_evaluations(request),
         )
+
+    async def analyze_multi_event_exp2(self, request):
+        """Run one complete, isolated exp2 weighted Louvain projection per performance."""
+        tickets_by_scope = {}
+        for ticket in request.tickets:
+            tickets_by_scope.setdefault(ticket.scope_key, []).append(ticket)
+
+        async with self.driver.session() as session:
+            try:
+                version_record = await (await session.run("RETURN gds.version() AS version")).single()
+            except Neo4jError:
+                raise GraphAnalysisUnavailable("GDS is unavailable") from None
+            if not version_record or not version_record["version"]:
+                raise GraphAnalysisUnavailable("GDS version is unavailable")
+            algorithm_version = f"gds-{version_record['version']};{PROJECTION_VERSION_EXP2};{SCORE_VERSION_EXP2}"
+            communities = {}
+            for scope in request.ledger_scopes:
+                tickets = tickets_by_scope.get(scope.key, [])
+                graph = build_account_token_graph_exp2(tickets)
+                scope_communities = []
+                if graph.edges:
+                    graph_name = f"track1_mei_{uuid.uuid4().hex}"
+                    projection_created = False
+                    failure = None
+                    try:
+                        projection_created = True
+                        projected = await session.run(
+                            """
+                            UNWIND $edges AS edge
+                            WITH gds.graph.project(
+                                $graph_name, edge.source, edge.target,
+                                {sourceNodeProperties:{accountIndex:edge.account_index},
+                                 targetNodeProperties:{accountIndex:-1},
+                                 relationshipType:'SIGNAL',
+                                 relationshipProperties:{weight:edge.weight}},
+                                {undirectedRelationshipTypes:['SIGNAL']}
+                            ) AS graph
+                            RETURN graph.nodeCount AS nodeCount
+                            """,
+                            graph_name=graph_name, edges=list(graph.edges),
+                        )
+                        projection_record = await projected.single()
+                        expected_nodes = len(graph.accounts) + len(graph.tokens)
+                        if not projection_record or projection_record["nodeCount"] != expected_nodes:
+                            raise GraphResultInvalid("Incomplete exp2 multi-event graph projection")
+                        result = await session.run(
+                            """
+                            CALL gds.louvain.stream($graph_name, {
+                                relationshipWeightProperty:'weight', concurrency:1
+                            }) YIELD nodeId, communityId
+                            RETURN gds.util.nodeProperty($graph_name,nodeId,'accountIndex') AS accountIndex,
+                                   communityId
+                            """,
+                            graph_name=graph_name,
+                        )
+                        grouped = {}
+                        async for row in result:
+                            index = row["accountIndex"]
+                            if isinstance(index, int) and 0 <= index < len(graph.accounts):
+                                grouped.setdefault(int(row["communityId"]), set()).add(graph.accounts[index].account_id)
+                        seen = set().union(*grouped.values()) if grouped else set()
+                        if seen != {account.account_id for account in graph.accounts}:
+                            raise GraphResultInvalid("Incomplete exp2 multi-event Louvain result")
+                        scope_communities = [frozenset(group) for group in grouped.values()]
+                    except Exception as exc:
+                        failure = exc
+                        raise
+                    finally:
+                        if projection_created:
+                            try:
+                                await (await session.run(
+                                    "CALL gds.graph.drop($graph_name,false) YIELD graphName RETURN graphName",
+                                    graph_name=graph_name,
+                                )).consume()
+                            except Exception:
+                                if failure is None:
+                                    raise
+                                logger.error("Multi-event exp2 graph cleanup failed")
+                communities[scope.key] = scope_communities
+            return communities, algorithm_version
 
     async def analyze_bulk_sqlite(self, repository, job_id: str, manifest) -> str:
         """Project one complete SQLite-staged job and stream only account communities.

@@ -6,7 +6,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from api.routes import graph_routes, vlm_routes
+from api.routes import graph_routes, multi_event_routes, vlm_routes
 from core import dependencies
 from core.vlm_errors import VLMBodyTooLarge, VLMProblem, problem_response
 from core.track1_security import Track1AuthGate
@@ -124,4 +124,5 @@ app.add_middleware(Track1AuthGate)
 app.include_router(graph_routes.router, prefix="/api/v1")
 app.include_router(graph_routes.v2_router, prefix="/api/v2")
 app.include_router(graph_routes.bulk_router, prefix="/api/v2")
+app.include_router(multi_event_routes.router, prefix="/api/v2")
 app.include_router(vlm_routes.router, prefix="/api/v1")

@@ -10,8 +10,10 @@
 
 - `analysisId`, 서버 소유 `tenantId`, 고정 `ledgerVersionSetDigest`, `analysisAsOf`, score 및
   projection version을 받는다.
-- `ledgerScopes`는 두 개 이상이며 ticket의 event, performance, ledgerVersion 조합 및 선택된
-  `policySnapshotId`를 고정한다.
+- `ledgerScopes`는 서로 다른 performance(회차) 두 개 이상을 담아야 한다. event는 하나여도
+  된다(같은 공연의 다른 회차). 회차가 하나뿐이면 `multi_event_scope_required`로 거절한다.
+  각 scope는 ticket의 event, performance, ledgerVersion 조합 및 선택된 `policySnapshotId`를
+  고정한다.
 - 모든 ticket은 하나의 supplier namespace, `TRACK1_CONNECTION` purpose, 하나의 HMAC key
   version을 사용해야 한다.
 - 동일 예약 안에 여러 티켓 행이 있을 수 있으므로 Backend가 고정 scope별 `sourceRowOrdinal`을
@@ -20,13 +22,54 @@
   NDJSON artifact 기반 비동기 계약이 필요하며 이 제한을 올리는 방식으로 처리하지 않는다.
 - 원본 IP, 원본 계좌, 연락처, 주소, 카드 번호는 받지 않는다.
 
-## 후보 생성
+## 점수 버전
 
-- 안정 계정 참조와 refund account, phone, device, address의 검증된 공유 관계만 union 한다.
-- payment와 IP 시간창은 공연 간 union 조건이 아니다.
-- 두 회차 이상에 실제 관측된 두 계정 이상 후보만 반환한다.
-- `scoreVersion`은 최종 다공연 recurrence 모델, `projectionScoreVersion`은 회차별 exp2 edge
-  가중치, `projectionVersion`은 그래프 투영을 뜻한다. `algorithmVersion`은 GDS runtime만 담는다.
+- `scoreVersion`은 `score-v2-exp2-multi-performance-recurrence`다. 이전 값
+  `score-v2-exp2-multi-event-recurrence`는 퇴역했다. 새 JSON 요청과 새 artifact manifest에서
+  이전 값을 받으면 422와 `{"detail":[{"code":"SCORE_VERSION_RETIRED"}]}`를 반환한다. 이전
+  값으로 이미 저장된 artifact 작업의 상태와 결과 페이지는 읽기 전용으로 조회할 수 있고, 그런
+  작업을 다시 실행하면 `INPUT_REJECTED`와 `SCORE_VERSION_RETIRED`로 끝난다.
+- `projectionScoreVersion`(`score-v2-exp2`)은 회차별 exp2 edge 가중치, `projectionVersion`은
+  그래프 투영을 뜻하며 바뀌지 않았다. `algorithmVersion`은 GDS runtime만 담는다.
+
+## 후보 생성: 연결 조건
+
+연결 조건은 "이 계정들을 하나의 후보로 묶어도 되는가"만 결정한다. 점수는 아래 점수 구성에서
+따로 계산한다. 두 조건 모두 서로 다른 두 회차 쌍(같은 공연의 다른 회차 포함)에서만 성립하며,
+각 회차의 전체 GDS Louvain 결과를 그대로 쓴다.
+
+1. 강한 신호 반복(`refund_account_hash`, `phone_hash`, `device_id_hash`, `address_hash`):
+   같은 token을 두 회차에서 각각 같은 군집 안의 계정들이 공유하면 두 회차 소유 계정의 정확한
+   교집합(2계정 이상)이 후보 구성원이다. hard hub로 제외된 token은 근거가 아니다.
+2. 같은 계정의 반복 동시 군집(`stable_account_cocluster`): 같은 계정 2개 이상이 두 회차에서
+   각각 같은 군집에 있으면 그 정확한 교집합이 후보 구성원이다. 계정 ID에서 (회차, 군집)으로
+   가는 역색인으로 계산하며 비교 횟수는 계정별 소속 수 `m`의 `m(m-1)/2` 합으로 미리 계산한다.
+   2,000,000회를 넘으면 결과를 자르지 않고 실패한다(JSON 경로는 422, artifact 경로는 `FAILED`,
+   코드 `RECURRENCE_COMPARISON_LIMIT_EXCEEDED`).
+
+- 겹치는 교집합(A와 B의 교집합, B와 C의 교집합)은 하나로 합치지 않는다. 추이 병합은 하지 않는다.
+- 결제와 IP 시간창은 서로 다른 계정을 잇는 단독 연결 조건이 아니다. 같은 계정 집합이 두 회차에서
+  반복해서 같은 군집에 묶인 사실은 계정 연속성에 근거하므로 2번 조건으로 연결된다. 회차마다 다른
+  계정이 같은 IP 시간창을 쓴 기숙사형 사례는 교집합이 2계정 미만이므로 후보가 아니다.
+- 같은 구성원 집합이 여러 근거로 만들어지면 하나의 후보로 모으고, 관계 유형별로 근거가 관측된
+  회차를 `relationships`에 남긴다. `verifiedRelationshipCount`는 (관계 유형, 회차) 쌍의 수다.
+- 후보는 서로 다른 회차 2개 이상, 계정 2개 이상이어야 하고, 구성원 두 명 이상이 출처 회차에서
+  직접 공유한(제외되지 않은) exp2 신호가 하나 이상 있어야 한다. 직접 공유 신호가 없으면 L이 0이어서
+  설명 가능한 근거가 없으므로 후보로 내지 않는다.
+
+## 후보 점수: 점수 구성
+
+- L은 exp2 정의 `1 - prod(1 - r_s * dbar_s * c_s)`를 그대로 쓴다. 신호 s는 후보 구성원 두 명
+  이상이 출처 회차에서 실제로 공유한 모든 exp2 신호(환불 계좌, 연락처, 기기, 주소, 결제,
+  망 유형별 IP 시간창)다. 연결 조건에 쓰이지 않은 결제와 IP 시간창도 L에는 들어간다.
+- `c_s`는 제외되지 않은 s token을 공유한 서로 다른 구성원 수를 후보 구성원 수로 나눈 값이다.
+  `dbar_s`는 (회차, token)마다 각 회차의 `damping()` 결과를 평균한 값이다. hard hub로 제외된
+  token은 L에 넣지 않고 `excludedSignals`에 신호 이름만 남긴다.
+- R은 사전 등록 정의 `min((performanceCount - 1) / 3, 1)`이며 performanceCount는 후보 출처
+  scope의 서로 다른 회차 수다. G, Q, B, S와 보고 band는 exp2 정의와 같다.
+- `availableSignals`는 L에 들어간 신호, `unavailableSignals`는 공유되지 않은 기본 신호와 IP
+  시간창 전체가 없을 때의 `ip_window`, `normalSharingPossibilities`는 공유 신호가 있을 때
+  `NORMAL_SHARED_POSSIBLE`이다.
 - Q는 고정된 policy snapshot과 동일 source version의 complete 수량이 모든 후보 계정/출처에서
   확인된 경우에만 계산한다. 그 외에는 중립값과 실제 불확실성 사유를 반환한다.
 - response의 memberAccountIds와 relationships는 인증된 Spring 저장 경로 전용이다. Data는
@@ -34,9 +77,9 @@
 
 ## 한계
 
-이 경로는 제품 후보를 만들지만 Louvain GDS를 다공연 전체 그래프로 바꾸지 않는다. 회차별
-Louvain은 기존 경로에서 독립적으로 유지한다. 관계 반복은 같은 강한 가명 신호가 서로 다른
-공연에서 반복된 구성원 교집합으로 산출하며 추이 병합은 하지 않는다.
+이 경로는 제품 후보를 만들지만 Louvain GDS를 다회차 전체 그래프로 바꾸지 않는다. 회차별
+Louvain은 기존 경로에서 독립적으로 유지한다. 서로 다른 공급자 namespace, HMAC 목적, 키 버전의
+데이터는 한 요청에 섞을 수 없다. 점수는 조사 우선순위이며 위반 확정이 아니다.
 
 ## 대용량 NDJSON 작업 계약
 
@@ -85,9 +128,11 @@ opaque 객체 이름이다.
 - 완료된 결과는 후보, 구성원, 관계 페이지 endpoint에서 숫자 offset cursor로 조회한다.
   각 페이지는 `cursor`, `nextCursor`, `totalCount`, `ledgerVersionSetDigest`, `records`를
   포함한다. page size는 1부터 500까지다. 완료 전에는 결과 조회를 차단한다.
-- relation은 비밀 token을 반환하지 않는다. 각 후보는 두 서로 다른 공연에서 같은 강한
-  신호가 반복된 구성원 집합의 정확한 교집합으로 만들어지며 추이 병합하지 않는다.
-  관계 페이지의 `accountCount`는 그 후보의 모든 구성원이 해당 신호/출처 조합에 포함됨을
+- relation은 비밀 token을 반환하지 않는다. 후보는 위 연결 조건(강한 신호 반복 또는
+  `stable_account_cocluster`)과 점수 구성 규칙을 JSON 경로와 같은 순수 함수
+  (`services/multi_event_candidates.py`)로 계산하며 추이 병합하지 않는다. 같은 입력과 군집
+  결과에서 두 경로의 후보 ID, 구성원, 점수, 관계는 같아야 한다(패리티 테스트).
+  관계 페이지의 `accountCount`는 그 후보의 모든 구성원이 해당 관계 유형/출처 조합에 포함됨을
   뜻한다. 관계별 실제 token은 반환하지 않는다.
 
 이 artifact 처리량 상한은 400,000행 입력을 받도록 설정된 계약이며 실제 400,000행 GDS

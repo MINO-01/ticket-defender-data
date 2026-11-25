@@ -78,7 +78,7 @@ def multi_event_payload():
         "analysisAsOf": "2026-01-01T00:00:00Z",
         "analysisStartAt": "2025-12-01T00:00:00Z",
         "analysisEndAt": "2026-01-01T00:00:00Z",
-        "scoreVersion": "score-v2-exp2-multi-event-recurrence",
+        "scoreVersion": "score-v2-exp2-multi-performance-recurrence",
         "projectionVersion": "projection-v2.2-exp2-ipwindow-softhub",
         "ledgerScopes": [
             {"eventId": "event-a", "performanceId": first_performance, "ledgerVersionId": first_ledger, "sourceBatchId": "batch-a"},
@@ -245,6 +245,15 @@ class Track1InternalAuthTests(unittest.TestCase):
         self.assertEqual(response.json(), {"detail": {"code": "MULTI_EVENT_ANALYSIS_FAILED"}})
         self.assertNotIn("candidates", response.text)
         self.assertEqual(self.dependency_calls, 1)
+
+    def test_multi_event_retired_score_version_returns_fixed_code_without_graph(self):
+        payload = multi_event_payload()
+        payload["scoreVersion"] = "score-v2-exp2-multi-event-recurrence"
+        response = self.client.post(MULTI_EVENT_ANALYZE, json=payload, headers={"X-TD-Track1-Key": TRACK1_KEY})
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {"detail": [{"code": "SCORE_VERSION_RETIRED"}]})
+        self.assertNotIn(payload["analysisId"], response.text)
+        self.assert_graph_untouched()
 
     def test_multi_event_validation_error_does_not_echo_input_tokens_or_secrets(self):
         sentinels = (

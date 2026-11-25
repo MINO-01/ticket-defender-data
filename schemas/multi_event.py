@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, StringConstraints, model_validator
+from pydantic import (
+    AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, StringConstraints, ValidationInfo, model_validator,
+)
 from pydantic_core import PydanticCustomError
 
 from schemas.dto import BulkId, HashToken, IpNetworkType, UUIDText
@@ -17,6 +19,26 @@ from schemas.dto import BulkId, HashToken, IpNetworkType, UUIDText
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 LongText = Annotated[str, StringConstraints(min_length=1, max_length=512)]
+RequestScoreVersion = Literal[
+    "score-v2-exp2-multi-performance-recurrence",
+    "score-v2-exp2-multi-event-recurrence",
+]
+RETIRED_SCORE_VERSIONS = frozenset({"score-v2-exp2-multi-event-recurrence"})
+# 저장된 작업 manifest를 다시 읽을 때만 퇴역 점수 버전을 허용하는 검증 context 키입니다.
+STORED_CONTEXT = {"allowStoredRetiredScoreVersion": True}
+
+
+def _reject_retired_score_version(score_version: str, info: ValidationInfo) -> None:
+    """퇴역한 다공연 점수 버전은 새 분석 요청에서 거절합니다."""
+    context = info.context or {}
+    if score_version in RETIRED_SCORE_VERSIONS and not context.get("allowStoredRetiredScoreVersion"):
+        raise PydanticCustomError("SCORE_VERSION_RETIRED", "Retired multi-event score version")
+
+
+def _require_distinct_performances(scopes) -> None:
+    """반복 근거는 서로 다른 회차 쌍에서만 만들므로 회차 2개 이상이 필요합니다. event는 1개여도 됩니다."""
+    if len({scope.performance_id for scope in scopes}) < 2:
+        raise PydanticCustomError("multi_event_scope_required", "At least two distinct performances are required")
 
 
 def _java_string_sort_key(value: str) -> bytes:
@@ -124,7 +146,7 @@ class MultiEventAnalysisRequest(BaseModel):
     analysis_as_of: AwareDatetime = Field(alias="analysisAsOf")
     analysis_start_at: AwareDatetime = Field(alias="analysisStartAt")
     analysis_end_at: AwareDatetime = Field(alias="analysisEndAt")
-    score_version: Literal["score-v2-exp2-multi-event-recurrence"] = Field(alias="scoreVersion")
+    score_version: RequestScoreVersion = Field(alias="scoreVersion")
     projection_version: Literal["projection-v2.2-exp2-ipwindow-softhub"] = Field(alias="projectionVersion")
     # Keep the small JSON compatibility contract unchanged. sourceEventId is
     # required only by the immutable artifact manifest below.
@@ -132,12 +154,14 @@ class MultiEventAnalysisRequest(BaseModel):
     tickets: list[MultiEventTicketInput] = Field(min_length=1, max_length=50_000)
 
     @model_validator(mode="after")
-    def validate_fixed_scope(self):
+    def validate_fixed_scope(self, info: ValidationInfo):
+        _reject_retired_score_version(self.score_version, info)
         if self.analysis_end_at <= self.analysis_start_at or self.analysis_end_at > self.analysis_as_of:
             raise PydanticCustomError("invalid_analysis_period", "Analysis period must be ordered and not after analysisAsOf")
         scope_keys = [scope.key for scope in self.ledger_scopes]
         if len(scope_keys) != len(set(scope_keys)):
             raise PydanticCustomError("duplicate_ledger_scope", "Ledger scopes must be unique")
+        _require_distinct_performances(self.ledger_scopes)
         scope_set = set(scope_keys)
         scopes_by_key = {scope.key: scope for scope in self.ledger_scopes}
         if any(ticket.scope_key not in scope_set for ticket in self.tickets):
@@ -183,7 +207,7 @@ class MultiEventArtifactManifest(BaseModel):
     analysis_as_of: AwareDatetime = Field(alias="analysisAsOf")
     analysis_start_at: AwareDatetime = Field(alias="analysisStartAt")
     analysis_end_at: AwareDatetime = Field(alias="analysisEndAt")
-    score_version: Literal["score-v2-exp2-multi-event-recurrence"] = Field(alias="scoreVersion")
+    score_version: RequestScoreVersion = Field(alias="scoreVersion")
     projection_version: Literal["projection-v2.2-exp2-ipwindow-softhub"] = Field(alias="projectionVersion")
     supplier_namespace: ShortText = Field(alias="supplierNamespace")
     hmac_purpose: Literal["TRACK1_CONNECTION"] = Field(alias="hmacPurpose")
@@ -191,7 +215,8 @@ class MultiEventArtifactManifest(BaseModel):
     ledger_scopes: list[MultiEventArtifactLedgerScope] = Field(alias="ledgerScopes", min_length=2, max_length=500)
 
     @model_validator(mode="after")
-    def validate_manifest(self):
+    def validate_manifest(self, info: ValidationInfo):
+        _reject_retired_score_version(self.score_version, info)
         if any(separator in self.object_key for separator in ("/", "\\", ":")):
             raise PydanticCustomError("INVALID_ARTIFACT_REFERENCE", "objectKey must be an opaque object name")
         if self.analysis_end_at <= self.analysis_start_at or self.analysis_end_at > self.analysis_as_of:
@@ -199,10 +224,7 @@ class MultiEventArtifactManifest(BaseModel):
         scope_keys = [scope.key for scope in self.ledger_scopes]
         if len(scope_keys) != len(set(scope_keys)):
             raise PydanticCustomError("duplicate_ledger_scope", "Ledger scopes must be unique")
-        external_events = {scope.event_id for scope in self.ledger_scopes}
-        internal_events = {scope.source_event_id for scope in self.ledger_scopes}
-        if len(external_events) < 2 or len(internal_events) < 2:
-            raise PydanticCustomError("multi_event_scope_required", "At least two distinct events are required")
+        _require_distinct_performances(self.ledger_scopes)
         internal_to_external: dict[str, str] = {}
         external_to_internal: dict[str, str] = {}
         for scope in self.ledger_scopes:
@@ -274,10 +296,11 @@ class MultiEventCandidateSummary(BaseModel):
 
     candidate_id: str = Field(alias="candidateId", min_length=1, max_length=128)
     priority_band: Literal["HIGH", "MEDIUM", "LOW"] = Field(alias="priorityBand")
-    score_version: Literal["score-v2-exp2-multi-event-recurrence"] = Field(alias="scoreVersion")
+    # 이전 점수 버전으로 저장된 작업 결과도 읽기 전용으로 조회할 수 있어야 합니다.
+    score_version: RequestScoreVersion = Field(alias="scoreVersion")
     projection_version: Literal["projection-v2.2-exp2-ipwindow-softhub"] = Field(alias="projectionVersion")
     distinct_account_count: StrictInt = Field(alias="distinctAccountCount", ge=2)
-    distinct_event_count: StrictInt = Field(alias="distinctEventCount", ge=2)
+    distinct_event_count: StrictInt = Field(alias="distinctEventCount", ge=1)
     distinct_performance_count: StrictInt = Field(alias="distinctPerformanceCount", ge=2)
     verified_relationship_count: StrictInt = Field(alias="verifiedRelationshipCount", ge=1)
     source_scopes: list[MultiEventLedgerScope] = Field(alias="sourceScopes", min_length=2, max_length=500)
@@ -348,7 +371,7 @@ class MultiEventCandidate(BaseModel):
 
     candidate_id: str = Field(alias="candidateId", min_length=1, max_length=128)
     priority_band: Literal["HIGH", "MEDIUM", "LOW"] = Field(alias="priorityBand")
-    score_version: Literal["score-v2-exp2-multi-event-recurrence"] = Field(alias="scoreVersion")
+    score_version: Literal["score-v2-exp2-multi-performance-recurrence"] = Field(alias="scoreVersion")
     projection_version: Literal["projection-v2.2-exp2-ipwindow-softhub"] = Field(alias="projectionVersion")
     distinct_account_count: StrictInt = Field(alias="distinctAccountCount", ge=2)
     distinct_event_count: StrictInt = Field(alias="distinctEventCount", ge=1)
@@ -369,7 +392,7 @@ class MultiEventAnalysisResponse(BaseModel):
 
     analysis_id: UUIDText = Field(alias="analysisId")
     ledger_version_set_digest: HashToken = Field(alias="ledgerVersionSetDigest")
-    score_version: Literal["score-v2-exp2-multi-event-recurrence"] = Field(alias="scoreVersion")
+    score_version: Literal["score-v2-exp2-multi-performance-recurrence"] = Field(alias="scoreVersion")
     projection_score_version: Literal["score-v2-exp2"] = Field(alias="projectionScoreVersion")
     projection_version: Literal["projection-v2.2-exp2-ipwindow-softhub"] = Field(alias="projectionVersion")
     algorithm: Literal["GDS_LOUVAIN"] = Field(alias="algorithm")

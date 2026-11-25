@@ -34,6 +34,19 @@ from schemas.multi_event import (
     MultiEventRelationshipSummary,
     MultiEventScoreBreakdown,
     MultiEventTicketInput,
+    RETIRED_SCORE_VERSIONS,
+    STORED_CONTEXT,
+)
+from services.multi_event_candidates import (
+    STABLE_ACCOUNT_COCLUSTER,
+    RecurrenceComparisonLimit,
+    cocluster_comparison_count,
+    cocluster_pairs,
+    evaluate_candidate,
+    link_inputs,
+    recurrence_pair_allowed,
+    require_comparison_budget,
+    token_damping,
 )
 from services.track1_bulk_jobs import (
     GdsResourceExhausted,
@@ -47,9 +60,7 @@ from services.track1_scoring_exp2 import (
     STRONG_RECURRENCE_SIGNALS,
     damping,
     ip_window_token,
-    priority_band_exp2,
     quantity_context,
-    score_exp2,
 )
 
 
@@ -170,6 +181,8 @@ class MultiEventArtifactJobRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_mei_token_lookup
                   ON mei_artifact_token_owners(job_id,signal,token,scope_id,account_id);
+                CREATE INDEX IF NOT EXISTS idx_mei_token_account
+                  ON mei_artifact_token_owners(job_id,account_id,scope_id);
                 CREATE TABLE IF NOT EXISTS mei_artifact_ip_types (
                   job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, token TEXT NOT NULL,
                   account_id TEXT NOT NULL, network_type TEXT NOT NULL,
@@ -245,6 +258,18 @@ class MultiEventArtifactJobRepository:
                   FOREIGN KEY(job_id,candidate_id) REFERENCES mei_artifact_candidates(job_id,candidate_id) ON DELETE CASCADE,
                   FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS mei_artifact_cocluster_members (
+                  job_id TEXT NOT NULL, left_scope_id INTEGER NOT NULL, left_community_id INTEGER NOT NULL,
+                  right_scope_id INTEGER NOT NULL, right_community_id INTEGER NOT NULL, account_id TEXT NOT NULL,
+                  PRIMARY KEY(job_id,left_scope_id,left_community_id,right_scope_id,right_community_id,account_id),
+                  FOREIGN KEY(job_id) REFERENCES mei_artifact_jobs(job_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS mei_artifact_candidate_cocluster (
+                  job_id TEXT NOT NULL, candidate_id TEXT NOT NULL, scope_id INTEGER NOT NULL,
+                  PRIMARY KEY(job_id,candidate_id,scope_id),
+                  FOREIGN KEY(job_id,candidate_id) REFERENCES mei_artifact_candidates(job_id,candidate_id) ON DELETE CASCADE,
+                  FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS mei_artifact_relationships (
                   job_id TEXT NOT NULL, candidate_id TEXT NOT NULL, relationship_id TEXT NOT NULL,
                   signal_type TEXT NOT NULL, account_count INTEGER NOT NULL,
@@ -302,14 +327,14 @@ class MultiEventArtifactJobRepository:
             row = db.execute("SELECT manifest_json FROM mei_artifact_jobs WHERE job_id=?", (job_id,)).fetchone()
         if not row:
             raise HTTPException(404, detail={"code": "MULTI_EVENT_JOB_NOT_FOUND"})
-        return MultiEventArtifactManifest.model_validate_json(row["manifest_json"])
+        return MultiEventArtifactManifest.model_validate_json(row["manifest_json"], context=STORED_CONTEXT)
 
     def status(self, job_id: str) -> MultiEventArtifactJobStatus:
         with _connect(self.path) as db:
             row = db.execute("SELECT status,input_record_count,processed_record_count,candidate_count,algorithm_version,failure_code,manifest_json,created_at,updated_at FROM mei_artifact_jobs WHERE job_id=?", (job_id,)).fetchone()
         if not row:
             raise HTTPException(404, detail={"code": "MULTI_EVENT_JOB_NOT_FOUND"})
-        manifest = MultiEventArtifactManifest.model_validate_json(row["manifest_json"])
+        manifest = MultiEventArtifactManifest.model_validate_json(row["manifest_json"], context=STORED_CONTEXT)
         return MultiEventArtifactJobStatus(
             jobId=job_id, status=row["status"], inputRecordCount=row["input_record_count"],
             processedRecordCount=row["processed_record_count"], candidateCount=row["candidate_count"],
@@ -350,7 +375,7 @@ class MultiEventArtifactJobRepository:
 
     def clear_stage(self, job_id: str) -> None:
         with _connect(self.path) as db:
-            for table in ("mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_rows"):
+            for table in ("mei_artifact_candidate_cocluster", "mei_artifact_cocluster_members", "mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_rows"):
                 db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
             db.execute("UPDATE mei_artifact_jobs SET input_record_count=0,processed_record_count=0,candidate_count=0,supplier_namespace=NULL,hmac_key_version=NULL WHERE job_id=?", (job_id,))
 
@@ -541,7 +566,8 @@ class MultiEventArtifactJobRepository:
 
         Only one bounded candidate membership set (at most 50,001 accounts) is
         materialized at a time. Evidence, candidates, members and relationships
-        are otherwise joined and persisted in SQLite.
+        are otherwise joined and persisted in SQLite. 연결 조건과 점수 구성은 JSON 경로와 같은
+        `services.multi_event_candidates` 순수 함수를 사용합니다.
         """
         scope_by_id = {index: scope for index, scope in enumerate(manifest.ledger_scopes)}
         with _connect(self.path) as db:
@@ -554,11 +580,13 @@ class MultiEventArtifactJobRepository:
                   ON r.job_id=l.job_id AND r.signal=l.signal AND r.token=l.token AND r.scope_id>l.scope_id
                 JOIN mei_artifact_scopes ls ON ls.job_id=l.job_id AND ls.scope_id=l.scope_id
                 JOIN mei_artifact_scopes rs ON rs.job_id=r.job_id AND rs.scope_id=r.scope_id
-                WHERE l.job_id=? AND ls.event_id<>rs.event_id
+                WHERE l.job_id=? AND ls.performance_id<>rs.performance_id
             """, (job_id,)).fetchone()[0]
             if pair_count > MAX_RECURRENCE_COMPARISONS:
                 raise MultiEventResourceLimit("RECURRENCE_COMPARISON_LIMIT_EXCEEDED")
 
+            budget = {"candidates": 0, "member_rows": 0, "evidence_rows": 0}
+            # (a) 강한 신호 반복: 같은 token이 서로 다른 회차의 같은 군집에서 반복된 정확한 교집합
             pairs = db.execute("""
                 SELECT l.group_id left_group_id,r.group_id right_group_id,
                        l.scope_id left_scope_id,r.scope_id right_scope_id
@@ -567,12 +595,9 @@ class MultiEventArtifactJobRepository:
                   ON r.job_id=l.job_id AND r.signal=l.signal AND r.token=l.token AND r.scope_id>l.scope_id
                 JOIN mei_artifact_scopes ls ON ls.job_id=l.job_id AND ls.scope_id=l.scope_id
                 JOIN mei_artifact_scopes rs ON rs.job_id=r.job_id AND rs.scope_id=r.scope_id
-                WHERE l.job_id=? AND ls.event_id<>rs.event_id
+                WHERE l.job_id=? AND ls.performance_id<>rs.performance_id
                 ORDER BY l.signal,l.token,l.scope_id,r.scope_id,l.community_id,r.community_id
             """, (job_id,))
-            candidate_count = 0
-            candidate_member_rows = 0
-            candidate_evidence_rows = 0
             comparisons = 0
             while True:
                 batch = pairs.fetchmany(100)
@@ -582,7 +607,7 @@ class MultiEventArtifactJobRepository:
                     comparisons += 1
                     left_scope = scope_by_id[pair["left_scope_id"]]
                     right_scope = scope_by_id[pair["right_scope_id"]]
-                    if left_scope.performance_id == right_scope.performance_id:
+                    if not recurrence_pair_allowed(left_scope.performance_id, right_scope.performance_id):
                         continue
                     owners = db.execute("""
                         SELECT l.account_id FROM mei_artifact_evidence_members l
@@ -593,44 +618,21 @@ class MultiEventArtifactJobRepository:
                     """, (job_id, pair["left_group_id"], pair["right_group_id"], MAX_CANDIDATE_MEMBERS + 1)).fetchall()
                     if len(owners) < 2:
                         continue
-                    if len(owners) > MAX_CANDIDATE_MEMBERS:
-                        raise MultiEventResourceLimit("CANDIDATE_MEMBER_LIMIT_EXCEEDED")
-                    accounts = [row["account_id"] for row in owners]
-                    candidate_id = _candidate_id(manifest.analysis_id, accounts)
-                    inserted = db.execute("""
-                        INSERT OR IGNORE INTO mei_artifact_candidates(
-                          job_id,candidate_id,priority_band,score,distinct_account_count,
-                          distinct_event_count,distinct_performance_count,verified_relationship_count,summary_json
-                        ) VALUES(?,?,'LOW',0,?,2,2,1,'{}')
-                    """, (job_id, candidate_id, len(accounts))).rowcount
-                    if inserted:
-                        candidate_count += 1
-                        if candidate_count > MAX_CANDIDATES:
-                            raise MultiEventResourceLimit("CANDIDATE_COUNT_LIMIT_EXCEEDED")
-                        if candidate_member_rows + len(accounts) > MAX_CANDIDATE_MEMBER_ROWS:
-                            raise MultiEventResourceLimit("MULTI_EVENT_CANDIDATE_MEMBER_ROW_BUDGET_EXCEEDED")
-                        candidate_member_rows += len(accounts)
-                        db.executemany("INSERT INTO mei_artifact_candidate_members(job_id,candidate_id,account_id) VALUES(?,?,?)",
-                                       [(job_id, candidate_id, account) for account in accounts])
-                    else:
-                        existing_count = db.execute("SELECT count(*) FROM mei_artifact_candidate_members WHERE job_id=? AND candidate_id=?", (job_id, candidate_id)).fetchone()[0]
-                        if existing_count != len(accounts):
-                            raise RuntimeError("MULTI_EVENT_CANDIDATE_ID_COLLISION")
-                    left_inserted = db.execute("INSERT OR IGNORE INTO mei_artifact_candidate_evidence(job_id,candidate_id,group_id) VALUES(?,?,?)",
-                                               (job_id, candidate_id, pair["left_group_id"])).rowcount
-                    right_inserted = db.execute("INSERT OR IGNORE INTO mei_artifact_candidate_evidence(job_id,candidate_id,group_id) VALUES(?,?,?)",
-                                                (job_id, candidate_id, pair["right_group_id"])).rowcount
-                    candidate_evidence_rows += left_inserted + right_inserted
-                    if candidate_evidence_rows > MAX_CANDIDATE_EVIDENCE_ROWS:
-                        raise MultiEventResourceLimit("CANDIDATE_EVIDENCE_BUDGET_EXCEEDED")
-                    evidence_count = db.execute("SELECT count(*) FROM mei_artifact_candidate_evidence WHERE job_id=? AND candidate_id=?", (job_id, candidate_id)).fetchone()[0]
-                    if evidence_count > MAX_CANDIDATE_EVIDENCE_GROUPS:
-                        raise MultiEventResourceLimit("CANDIDATE_EVIDENCE_LIMIT_EXCEEDED")
+                    candidate_id = self._register_candidate(db, job_id, manifest, owners, budget)
+                    inserted = 0
+                    for group_id in (pair["left_group_id"], pair["right_group_id"]):
+                        inserted += db.execute("INSERT OR IGNORE INTO mei_artifact_candidate_evidence(job_id,candidate_id,group_id) VALUES(?,?,?)",
+                                               (job_id, candidate_id, group_id)).rowcount
+                    self._charge_evidence(db, job_id, candidate_id, inserted, budget)
                 if comparisons % 1_000 == 0:
                     db.commit()
 
+            # (b) 같은 계정의 반복 동시 군집: 계정 -> (회차, 군집) 역색인
+            self._build_cocluster_candidates(db, job_id, manifest, scope_by_id, budget)
+
             candidate_cursor = db.execute("SELECT candidate_id FROM mei_artifact_candidates WHERE job_id=? ORDER BY candidate_id", (job_id,))
             completed_candidates = 0
+            kept_candidates = 0
             relationship_member_rows = 0
             while True:
                 candidate_batch = candidate_cursor.fetchmany(100)
@@ -640,18 +642,140 @@ class MultiEventArtifactJobRepository:
                     additional_relationship_members = self._finalize_candidate(
                         db, job_id, item["candidate_id"], manifest, scope_by_id,
                     )
+                    if additional_relationship_members:
+                        kept_candidates += 1
                     relationship_member_rows += additional_relationship_members
                     if relationship_member_rows > MAX_RELATIONSHIP_MEMBER_ROWS:
                         raise MultiEventResourceLimit("MULTI_EVENT_RELATIONSHIP_MEMBER_ROW_BUDGET_EXCEEDED")
                     completed_candidates += 1
                 if completed_candidates % 100 == 0:
                     db.commit()
-            if completed_candidates != candidate_count:
+            if completed_candidates != budget["candidates"]:
+                raise RuntimeError("MULTI_EVENT_CANDIDATE_RESULT_COUNT_MISMATCH")
+            stored = db.execute("SELECT count(*) FROM mei_artifact_candidates WHERE job_id=?", (job_id,)).fetchone()[0]
+            if stored != kept_candidates:
                 raise RuntimeError("MULTI_EVENT_CANDIDATE_RESULT_COUNT_MISMATCH")
             changed = db.execute("UPDATE mei_artifact_jobs SET candidate_count=?,algorithm_version=?,updated_at=? WHERE job_id=? AND status='RUNNING'",
-                                 (candidate_count, algorithm_version, _now(), job_id)).rowcount
+                                 (stored, algorithm_version, _now(), job_id)).rowcount
             if changed != 1:
                 raise RuntimeError("MULTI_EVENT_JOB_STATE_CONFLICT")
+
+    @staticmethod
+    def _register_candidate(db, job_id: str, manifest, owners, budget: dict) -> str:
+        """정확한 교집합 구성원으로 후보 자리를 만들거나 기존 후보를 재사용합니다."""
+        if len(owners) > MAX_CANDIDATE_MEMBERS:
+            raise MultiEventResourceLimit("CANDIDATE_MEMBER_LIMIT_EXCEEDED")
+        accounts = [row["account_id"] for row in owners]
+        candidate_id = _candidate_id(manifest.analysis_id, accounts)
+        inserted = db.execute("""
+            INSERT OR IGNORE INTO mei_artifact_candidates(
+              job_id,candidate_id,priority_band,score,distinct_account_count,
+              distinct_event_count,distinct_performance_count,verified_relationship_count,summary_json
+            ) VALUES(?,?,'LOW',0,?,1,2,1,'{}')
+        """, (job_id, candidate_id, len(accounts))).rowcount
+        if inserted:
+            budget["candidates"] += 1
+            if budget["candidates"] > MAX_CANDIDATES:
+                raise MultiEventResourceLimit("CANDIDATE_COUNT_LIMIT_EXCEEDED")
+            if budget["member_rows"] + len(accounts) > MAX_CANDIDATE_MEMBER_ROWS:
+                raise MultiEventResourceLimit("MULTI_EVENT_CANDIDATE_MEMBER_ROW_BUDGET_EXCEEDED")
+            budget["member_rows"] += len(accounts)
+            db.executemany("INSERT INTO mei_artifact_candidate_members(job_id,candidate_id,account_id) VALUES(?,?,?)",
+                           [(job_id, candidate_id, account) for account in accounts])
+        else:
+            existing_count = db.execute("SELECT count(*) FROM mei_artifact_candidate_members WHERE job_id=? AND candidate_id=?", (job_id, candidate_id)).fetchone()[0]
+            if existing_count != len(accounts):
+                raise RuntimeError("MULTI_EVENT_CANDIDATE_ID_COLLISION")
+        return candidate_id
+
+    @staticmethod
+    def _charge_evidence(db, job_id: str, candidate_id: str, inserted: int, budget: dict) -> None:
+        budget["evidence_rows"] += inserted
+        if budget["evidence_rows"] > MAX_CANDIDATE_EVIDENCE_ROWS:
+            raise MultiEventResourceLimit("CANDIDATE_EVIDENCE_BUDGET_EXCEEDED")
+        evidence_count = db.execute("""
+            SELECT (SELECT count(*) FROM mei_artifact_candidate_evidence WHERE job_id=? AND candidate_id=?)
+                 + (SELECT count(*) FROM mei_artifact_candidate_cocluster WHERE job_id=? AND candidate_id=?)
+        """, (job_id, candidate_id, job_id, candidate_id)).fetchone()[0]
+        if evidence_count > MAX_CANDIDATE_EVIDENCE_GROUPS:
+            raise MultiEventResourceLimit("CANDIDATE_EVIDENCE_LIMIT_EXCEEDED")
+
+    def _build_cocluster_candidates(self, db, job_id: str, manifest, scope_by_id, budget: dict) -> None:
+        """두 회차에서 같은 GDS 군집에 함께 있었던 계정의 정확한 교집합을 후보로 만듭니다.
+
+        비교 횟수는 계정별 소속 수로 먼저 계산하고, 상한을 넘으면 결과를 자르지 않고
+        작업을 실패시킵니다. 추이 병합은 하지 않습니다.
+        """
+        multi_member = """
+            SELECT c.account_id,c.scope_id,c.community_id FROM mei_artifact_communities c
+            JOIN (SELECT scope_id,community_id FROM mei_artifact_communities WHERE job_id=?
+                  GROUP BY scope_id,community_id HAVING count(*)>=2) g
+              ON g.scope_id=c.scope_id AND g.community_id=c.community_id
+            WHERE c.job_id=?
+        """
+        membership_counts = (row[0] for row in db.execute(
+            f"SELECT count(*) FROM ({multi_member}) GROUP BY account_id", (job_id, job_id),
+        ))
+        try:
+            require_comparison_budget(cocluster_comparison_count(membership_counts), MAX_RECURRENCE_COMPARISONS)
+        except RecurrenceComparisonLimit as exc:
+            raise MultiEventResourceLimit(exc.code) from None
+
+        memberships = db.execute(f"{multi_member} ORDER BY c.account_id,c.scope_id", (job_id, job_id))
+        current_account = None
+        current: list[tuple[int, str, int]] = []
+        staged = 0
+
+        def flush() -> None:
+            nonlocal staged
+            if current_account is None:
+                return
+            rows = [
+                (job_id, left[0], left[1], right[0], right[1], current_account)
+                for left, right in cocluster_pairs(current)
+            ]
+            if rows:
+                db.executemany("""
+                    INSERT INTO mei_artifact_cocluster_members(
+                      job_id,left_scope_id,left_community_id,right_scope_id,right_community_id,account_id
+                    ) VALUES(?,?,?,?,?,?)
+                """, rows)
+                staged += len(rows)
+                if staged % 5_000 < len(rows):
+                    db.commit()
+
+        while True:
+            batch = memberships.fetchmany(500)
+            if not batch:
+                break
+            for row in batch:
+                if row["account_id"] != current_account:
+                    flush()
+                    current_account, current = row["account_id"], []
+                scope_id = row["scope_id"]
+                current.append((scope_id, scope_by_id[scope_id].performance_id, row["community_id"]))
+        flush()
+
+        groups = db.execute("""
+            SELECT left_scope_id,left_community_id,right_scope_id,right_community_id
+            FROM mei_artifact_cocluster_members WHERE job_id=?
+            GROUP BY left_scope_id,left_community_id,right_scope_id,right_community_id
+            HAVING count(*)>=2
+            ORDER BY left_scope_id,left_community_id,right_scope_id,right_community_id
+        """, (job_id,)).fetchall()
+        for group in groups:
+            owners = db.execute("""
+                SELECT account_id FROM mei_artifact_cocluster_members
+                WHERE job_id=? AND left_scope_id=? AND left_community_id=? AND right_scope_id=? AND right_community_id=?
+                ORDER BY account_id LIMIT ?
+            """, (job_id, group["left_scope_id"], group["left_community_id"], group["right_scope_id"],
+                  group["right_community_id"], MAX_CANDIDATE_MEMBERS + 1)).fetchall()
+            candidate_id = self._register_candidate(db, job_id, manifest, owners, budget)
+            inserted = 0
+            for scope_id in (group["left_scope_id"], group["right_scope_id"]):
+                inserted += db.execute("INSERT OR IGNORE INTO mei_artifact_candidate_cocluster(job_id,candidate_id,scope_id) VALUES(?,?,?)",
+                                       (job_id, candidate_id, scope_id)).rowcount
+            self._charge_evidence(db, job_id, candidate_id, inserted, budget)
 
     @staticmethod
     def _build_quantity_contexts(db, job_id: str, scope_by_id) -> None:
@@ -754,22 +878,10 @@ class MultiEventArtifactJobRepository:
             for token_group in batch:
                 if token_group["owner_count"] < 2:
                     continue
-                factor = damping(token_group["signal"], token_group["owner_count"], scope_counts[token_group["scope_id"]])
+                factor = token_damping(token_group["signal"], token_group["owner_count"], scope_counts[token_group["scope_id"]])
                 if factor is None:
-                    digest = hashlib.sha256()
-                    owners = db.execute("""
-                        SELECT account_id FROM mei_artifact_token_owners
-                        WHERE job_id=? AND scope_id=? AND signal=? AND token=? ORDER BY account_id
-                    """, (job_id, token_group["scope_id"], token_group["signal"], token_group["token"]))
-                    while True:
-                        account_rows = owners.fetchmany(500)
-                        if not account_rows:
-                            break
-                        for account_row in account_rows:
-                            digest.update(account_row["account_id"].encode("ascii"))
-                            digest.update(b"\n")
-                    db.execute("INSERT OR IGNORE INTO mei_artifact_excluded_tokens(job_id,scope_id,signal,token,owner_count,owner_digest) VALUES(?,?,?,?,?,?)",
-                               (job_id, token_group["scope_id"], token_group["signal"], token_group["token"], token_group["owner_count"], digest.hexdigest()))
+                    # 제외된 hub token은 연결 근거가 아닙니다. 후보의 제외 신호는 점수 구성 단계에서
+                    # 구성원이 실제로 공유한 token 기준으로 다시 판정합니다.
                     continue
 
                 community_groups = db.execute("""
@@ -811,53 +923,67 @@ class MultiEventArtifactJobRepository:
         member_count = db.execute("SELECT count(*) FROM mei_artifact_candidate_members WHERE job_id=? AND candidate_id=?", (job_id, candidate_id)).fetchone()[0]
         if member_count < 2 or member_count > MAX_CANDIDATE_MEMBERS:
             raise MultiEventResourceLimit("CANDIDATE_MEMBER_LIMIT_EXCEEDED")
-        evidence_count = db.execute("SELECT count(*) FROM mei_artifact_candidate_evidence WHERE job_id=? AND candidate_id=?", (job_id, candidate_id)).fetchone()[0]
-        if evidence_count < 2 or evidence_count > MAX_CANDIDATE_EVIDENCE_GROUPS:
-            raise MultiEventResourceLimit("CANDIDATE_EVIDENCE_LIMIT_EXCEEDED")
-        scope_ids = [row["scope_id"] for row in db.execute("""
-            SELECT DISTINCT g.scope_id FROM mei_artifact_candidate_evidence ce
+        relation_rows = db.execute("""
+            SELECT DISTINCT g.signal relation_type,g.scope_id FROM mei_artifact_candidate_evidence ce
             JOIN mei_artifact_evidence_groups g ON g.job_id=ce.job_id AND g.group_id=ce.group_id
-            WHERE ce.job_id=? AND ce.candidate_id=? ORDER BY g.scope_id
-        """, (job_id, candidate_id))]
-        source_scope_values = [scope_by_id[index] for index in scope_ids]
-        source_scopes = sorted((_public_scope(scope) for scope in source_scope_values), key=lambda item: item.key)
-        event_ids = {scope.event_id for scope in source_scopes}
-        performance_ids = {scope.performance_id for scope in source_scopes}
-        if len(event_ids) < 2 or len(performance_ids) < 2:
-            db.execute("DELETE FROM mei_artifact_candidates WHERE job_id=? AND candidate_id=?", (job_id, candidate_id))
-            return 0
+            WHERE ce.job_id=? AND ce.candidate_id=?
+            UNION
+            SELECT ?,scope_id FROM mei_artifact_candidate_cocluster WHERE job_id=? AND candidate_id=?
+            ORDER BY 1,2
+        """, (job_id, candidate_id, STABLE_ACCOUNT_COCLUSTER, job_id, candidate_id)).fetchall()
+        if len(relation_rows) < 2 or len(relation_rows) > MAX_CANDIDATE_EVIDENCE_GROUPS:
+            raise MultiEventResourceLimit("CANDIDATE_EVIDENCE_LIMIT_EXCEEDED")
+        scopes_by_type: dict[str, list[int]] = {}
+        for row in relation_rows:
+            scopes_by_type.setdefault(row["relation_type"], []).append(row["scope_id"])
+        scope_ids = sorted({row["scope_id"] for row in relation_rows})
+        source_scopes = sorted((_public_scope(scope_by_id[index]) for index in scope_ids), key=lambda item: item.key)
         db.executemany("INSERT OR IGNORE INTO mei_artifact_candidate_scopes(job_id,candidate_id,scope_id) VALUES(?,?,?)",
                        [(job_id, candidate_id, index) for index in scope_ids])
 
-        covered = {}
-        coverage_rows = db.execute("""
-            SELECT g.signal,count(DISTINCT em.account_id) covered,avg(g.damping) mean_damping
-            FROM mei_artifact_candidate_evidence ce
-            JOIN mei_artifact_evidence_groups g ON g.job_id=ce.job_id AND g.group_id=ce.group_id
-            JOIN mei_artifact_evidence_members em ON em.job_id=g.job_id AND em.group_id=g.group_id
-            WHERE ce.job_id=? AND ce.candidate_id=? GROUP BY g.signal ORDER BY g.signal
-        """, (job_id, candidate_id))
-        for row in coverage_rows:
-            covered[row["signal"]] = (min(row["covered"] / member_count, 1.0), row["mean_damping"])
-        if not covered:
-            db.execute("DELETE FROM mei_artifact_candidates WHERE job_id=? AND candidate_id=?", (job_id, candidate_id))
-            return 0
-        coverage = {signal: value[0] for signal, value in covered.items()}
-        mean_damping = {signal: value[1] for signal, value in covered.items()}
-
-        member_digest = hashlib.sha256()
-        member_cursor = db.execute("SELECT account_id FROM mei_artifact_candidate_members WHERE job_id=? AND candidate_id=? ORDER BY account_id", (job_id, candidate_id))
-        while True:
-            rows = member_cursor.fetchmany(500)
-            if not rows:
-                break
-            for row in rows:
-                member_digest.update(row["account_id"].encode("ascii"))
-                member_digest.update(b"\n")
-        excluded_signals = [row["signal"] for row in db.execute("""
-            SELECT DISTINCT signal FROM mei_artifact_excluded_tokens
-            WHERE job_id=? AND owner_count=? AND owner_digest=? ORDER BY signal
-        """, (job_id, member_count, member_digest.hexdigest()))]
+        # 점수 구성: 출처 회차에서 구성원 두 명 이상이 실제로 공유한 모든 exp2 신호
+        marks = ",".join("?" for _ in scope_ids)
+        scope_counts = {row["scope_id"]: row["n"] for row in db.execute(
+            f"SELECT scope_id,count(*) n FROM mei_artifact_accounts WHERE job_id=? AND scope_id IN ({marks}) GROUP BY scope_id",
+            (job_id, *scope_ids),
+        )}
+        member_tokens = """
+            SELECT o.scope_id,o.signal,o.token,o.account_id
+            FROM mei_artifact_candidate_members cm
+            JOIN mei_artifact_candidate_scopes cs ON cs.job_id=cm.job_id AND cs.candidate_id=cm.candidate_id
+            JOIN mei_artifact_token_owners o ON o.job_id=cm.job_id AND o.account_id=cm.account_id AND o.scope_id=cs.scope_id
+            WHERE cm.job_id=? AND cm.candidate_id=?
+        """
+        db.execute("CREATE TEMP TABLE IF NOT EXISTS mei_included_tokens(scope_id INTEGER NOT NULL, signal TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(scope_id,signal,token))")
+        db.execute("DELETE FROM mei_included_tokens")
+        dampings: dict[str, list[float]] = {}
+        excluded: set[str] = set()
+        shared = db.execute(f"""
+            SELECT mt.scope_id,mt.signal,mt.token,
+              (SELECT count(*) FROM mei_artifact_token_owners t
+               WHERE t.job_id=? AND t.scope_id=mt.scope_id AND t.signal=mt.signal AND t.token=mt.token) owner_count
+            FROM ({member_tokens}) mt
+            GROUP BY mt.scope_id,mt.signal,mt.token HAVING count(*)>=2
+            ORDER BY mt.signal,mt.scope_id,mt.token
+        """, (job_id, job_id, candidate_id)).fetchall()
+        for row in shared:
+            try:
+                factor = token_damping(row["signal"], row["owner_count"], scope_counts.get(row["scope_id"], 0))
+            except ValueError as exc:
+                raise InputRejected("UNKNOWN_EXP2_SIGNAL") from exc
+            if factor is None:
+                excluded.add(row["signal"])
+                continue
+            dampings.setdefault(row["signal"], []).append(factor)
+            db.execute("INSERT INTO mei_included_tokens(scope_id,signal,token) VALUES(?,?,?)",
+                       (row["scope_id"], row["signal"], row["token"]))
+        covered = {row["signal"]: row["covered"] for row in db.execute(f"""
+            SELECT mt.signal,count(DISTINCT mt.account_id) covered FROM ({member_tokens}) mt
+            JOIN mei_included_tokens i ON i.scope_id=mt.scope_id AND i.signal=mt.signal AND i.token=mt.token
+            GROUP BY mt.signal ORDER BY mt.signal
+        """, (job_id, candidate_id))}
+        db.execute("DELETE FROM mei_included_tokens")
+        link = link_inputs(member_count, covered, dampings, excluded)
 
         q_row = db.execute("""
             SELECT count(*) expected_contexts,
@@ -895,49 +1021,35 @@ class MultiEventArtifactJobRepository:
                 quantity_reason = "MULTIPLE_QUANTITY_UNCERTAINTY_REASONS"
             quantity = quantity_context(None, quantity_reason)
 
-        score = score_exp2(member_count, coverage, mean_damping, quantity, len(event_ids), excluded_signals=excluded_signals)
-        available = sorted(coverage)
-        unavailable = sorted(set(STRONG_RECURRENCE_SIGNALS) - set(available))
-        normal = ["NORMAL_SHARED_POSSIBLE"] if any(
-            signal in {"refund_account_hash", "phone_hash", "address_hash", "device_id_hash"} for signal in available
-        ) else []
+        evaluation = evaluate_candidate(
+            member_count, [(scope.event_id, scope.performance_id) for scope in source_scopes], link, quantity,
+        )
+        if evaluation is None:
+            db.execute("DELETE FROM mei_artifact_candidates WHERE job_id=? AND candidate_id=?", (job_id, candidate_id))
+            return 0
+        score = evaluation.score
 
-        rel_cursor = db.execute("""
-            SELECT DISTINCT g.signal,g.scope_id FROM mei_artifact_candidate_evidence ce
-            JOIN mei_artifact_evidence_groups g ON g.job_id=ce.job_id AND g.group_id=ce.group_id
-            WHERE ce.job_id=? AND ce.candidate_id=? ORDER BY g.signal,g.scope_id
-        """, (job_id, candidate_id))
-        scopes_by_signal: dict[str, list[int]] = {}
-        distinct_relationships = 0
-        while True:
-            batch = rel_cursor.fetchmany(500)
-            if not batch:
-                break
-            for row in batch:
-                scopes_by_signal.setdefault(row["signal"], []).append(row["scope_id"])
-                distinct_relationships += 1
-
-        for signal, signal_scope_ids in sorted(scopes_by_signal.items()):
-            signal_scopes = sorted((_public_scope(scope_by_id[index]) for index in signal_scope_ids), key=lambda item: item.key)
-            rel_id = "rel-" + hashlib.sha256(f"MEI_REL|{candidate_id}|{signal}".encode("utf-8")).hexdigest()
-            scope_json = json.dumps([scope.model_dump(mode="json", by_alias=True) for scope in signal_scopes], sort_keys=True, separators=(",", ":"))
+        for relation_type, relation_scope_ids in sorted(scopes_by_type.items()):
+            relation_scopes = sorted((_public_scope(scope_by_id[index]) for index in relation_scope_ids), key=lambda item: item.key)
+            rel_id = "rel-" + hashlib.sha256(f"MEI_REL|{candidate_id}|{relation_type}".encode("utf-8")).hexdigest()
+            scope_json = json.dumps([scope.model_dump(mode="json", by_alias=True) for scope in relation_scopes], sort_keys=True, separators=(",", ":"))
             db.execute("INSERT OR REPLACE INTO mei_artifact_relationships(job_id,candidate_id,relationship_id,signal_type,account_count,source_scope_count,source_scopes_json) VALUES(?,?,?,?,?,?,?)",
-                       (job_id, candidate_id, rel_id, signal, member_count, len(signal_scopes), scope_json))
+                       (job_id, candidate_id, rel_id, relation_type, member_count, len(relation_scopes), scope_json))
 
         summary = MultiEventCandidateSummary(
             candidateId=candidate_id,
-            priorityBand=priority_band_exp2(score.score),
+            priorityBand=evaluation.priority_band,
             scoreVersion=manifest.score_version,
             projectionVersion=manifest.projection_version,
             distinctAccountCount=member_count,
-            distinctEventCount=len(event_ids),
-            distinctPerformanceCount=len(performance_ids),
-            verifiedRelationshipCount=distinct_relationships,
+            distinctEventCount=evaluation.distinct_event_count,
+            distinctPerformanceCount=evaluation.distinct_performance_count,
+            verifiedRelationshipCount=len(relation_rows),
             sourceScopes=source_scopes,
-            availableSignals=available,
-            excludedSignals=list(score.excluded_signals),
-            unavailableSignals=unavailable,
-            normalSharingPossibilities=normal,
+            availableSignals=list(evaluation.available_signals),
+            excludedSignals=list(evaluation.excluded_signals),
+            unavailableSignals=list(evaluation.unavailable_signals),
+            normalSharingPossibilities=list(evaluation.normal_sharing_possibilities),
             scoreBreakdown=MultiEventScoreBreakdown(
                 L=score.link, G=score.size, B=score.behavior, Q=score.quantity,
                 R=score.recurrence, score=score.score,
@@ -951,7 +1063,7 @@ class MultiEventArtifactJobRepository:
         """, (summary.priority_band, score.score, summary.distinct_account_count,
               summary.distinct_event_count, summary.distinct_performance_count,
               summary.verified_relationship_count, summary.model_dump_json(by_alias=True), job_id, candidate_id))
-        return member_count * len(scopes_by_signal)
+        return member_count * len(scopes_by_type)
 
     def _completed_job_manifest(self, db, job_id: str):
         row = db.execute("SELECT status,manifest_json FROM mei_artifact_jobs WHERE job_id=?", (job_id,)).fetchone()
@@ -959,7 +1071,7 @@ class MultiEventArtifactJobRepository:
             raise HTTPException(404, detail={"code": "MULTI_EVENT_JOB_NOT_FOUND"})
         if row["status"] != "COMPLETED":
             raise HTTPException(409, detail={"code": "RESULT_NOT_AVAILABLE", "status": row["status"]})
-        return MultiEventArtifactManifest.model_validate_json(row["manifest_json"])
+        return MultiEventArtifactManifest.model_validate_json(row["manifest_json"], context=STORED_CONTEXT)
 
     @staticmethod
     def _cursor_values(cursor: str | None, limit: int) -> tuple[int, int]:
@@ -1097,6 +1209,11 @@ class MultiEventArtifactJobService:
     async def _run_claimed(self, job_id: str) -> None:
         manifest = self.repository.manifest(job_id)
         if not self.repository.start(job_id):
+            return
+        if manifest.score_version in RETIRED_SCORE_VERSIONS:
+            # 퇴역 점수 버전으로 저장된 작업은 결과 조회만 허용하고 새 규칙으로 다시 계산하지 않습니다.
+            self.repository.transition(job_id, "INPUT_REJECTED", failure="SCORE_VERSION_RETIRED")
+            self.tasks.pop(job_id, None)
             return
         try:
             await asyncio.to_thread(self.repository.clear_stage, job_id)

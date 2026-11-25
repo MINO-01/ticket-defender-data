@@ -157,7 +157,9 @@ class GraphService:
                 raise GraphAnalysisUnavailable("GDS is unavailable") from None
             if not version_record or not version_record["version"]:
                 raise GraphAnalysisUnavailable("GDS version is unavailable")
-            algorithm_version = f"gds-{version_record['version']};{PROJECTION_VERSION_EXP2};{SCORE_VERSION_EXP2}"
+            # Keep the GDS runtime separate from both the edge projection score and
+            # the final multi-event recurrence score. Those are separate contract fields.
+            algorithm_version = f"gds-{version_record['version']}"
             communities = {}
             for scope in request.ledger_scopes:
                 tickets = tickets_by_scope.get(scope.key, [])

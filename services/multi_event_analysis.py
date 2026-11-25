@@ -22,6 +22,7 @@ from schemas.multi_event import (
 )
 from services.track1_scoring_exp2 import (
     DEFAULT_EXP2_PARAMETERS,
+    SCORE_VERSION_EXP2,
     STRONG_RECURRENCE_SIGNALS,
     damping,
     priority_band_exp2,
@@ -33,6 +34,7 @@ from services.track1_scoring_exp2 import (
 @dataclass(frozen=True)
 class _Evidence:
     signal: str
+    token: str
     owners: frozenset[str]
     weight: float
     source_scope: MultiEventLedgerScope
@@ -45,6 +47,62 @@ def _candidate_id(analysis_id: str, accounts: Iterable[str]) -> str:
 
 def _scope_rows(request: MultiEventAnalysisRequest, keys: set[tuple[str, str, str]]) -> list[MultiEventLedgerScope]:
     return sorted((scope for scope in request.ledger_scopes if scope.key in keys), key=lambda scope: scope.key)
+
+
+def _quantity_contexts(request: MultiEventAnalysisRequest):
+    """Build one verified quantity context per account and fixed performance scope."""
+    provenances: dict[tuple[tuple[str, str, str], str], set[tuple]] = defaultdict(set)
+    uncertainties: dict[tuple[tuple[str, str, str], str], set[str]] = defaultdict(set)
+    scopes = {scope.key: scope for scope in request.ledger_scopes}
+    for ticket in request.tickets:
+        key = (ticket.scope_key, ticket.account_id)
+        if ticket.quantity_status != "COMPLETE":
+            uncertainties[key].add(ticket.quantity_reason or ticket.quantity_status or "QUANTITY_INCOMPLETE")
+            continue
+        scope = scopes[ticket.scope_key]
+        if (scope.policy_snapshot_id is None
+                or ticket.quantity_policy_snapshot_id != scope.policy_snapshot_id
+                or ticket.quantity_source_version != ticket.source_version
+                or ticket.effective_ticket_quantity is None
+                or ticket.confirmed_purchase_limit is None
+                or ticket.quantity_policy_version is None):
+            uncertainties[key].add("QUANTITY_POLICY_SOURCE_MISMATCH")
+            continue
+        provenances[key].add((ticket.effective_ticket_quantity, ticket.confirmed_purchase_limit,
+                              ticket.quantity_policy_snapshot_id, ticket.quantity_policy_version,
+                              ticket.quantity_source_version))
+
+    contexts = {}
+    for key in provenances.keys() | uncertainties.keys():
+        values = provenances.get(key, set())
+        reasons = uncertainties.get(key, set())
+        if reasons:
+            contexts[key] = quantity_context(None, "|".join(sorted(reasons)))
+        elif len(values) != 1:
+            contexts[key] = quantity_context(None, "QUANTITY_ACCOUNT_OBSERVATION_INCONSISTENT")
+        else:
+            quantity, limit, *_ = next(iter(values))
+            contexts[key] = quantity_context(min(quantity / limit, 1.0), "POLICY_SNAPSHOT_AND_QUANTITY_VERIFIED")
+    return contexts
+
+
+def _quantity_for_candidate(accounts: frozenset[str], source_scopes: list[MultiEventLedgerScope], contexts):
+    values: list[float] = []
+    uncertainty: set[str] = set()
+    for scope in source_scopes:
+        for account in accounts:
+            context = contexts.get((scope.key, account))
+            if context is None:
+                uncertainty.add("QUANTITY_SOURCE_SCOPE_MISSING")
+                continue
+            if context.status != "VERIFIED":
+                uncertainty.add(context.reason or context.status)
+                continue
+            values.append(context.value)
+    if uncertainty or not values:
+        reason = "|".join(sorted(uncertainty)) if uncertainty else "QUANTITY_SOURCE_UNAVAILABLE"
+        return quantity_context(None, reason)
+    return quantity_context(sum(values) / len(values), "POLICY_SNAPSHOT_AND_QUANTITY_VERIFIED")
 
 
 def analyze_multi_event(
@@ -68,8 +126,9 @@ def analyze_multi_event(
             token = getattr(ticket, signal)
             if token is not None:
                 owner_tokens[(ticket.scope_key, signal, token)].add(ticket.account_id)
+    quantity_contexts = _quantity_contexts(request)
 
-    repeated_tokens: dict[tuple[str, frozenset[str]], list[_Evidence]] = defaultdict(list)
+    evidence_by_token: dict[tuple[str, str], list[_Evidence]] = defaultdict(list)
     excluded_by_members: dict[frozenset[str], set[str]] = defaultdict(set)
     for (scope_key, signal, token), owners in sorted(owner_tokens.items()):
         if len(owners) < 2:
@@ -84,9 +143,28 @@ def analyze_multi_event(
             community_owners = owners.intersection(community)
             if len(community_owners) >= 2:
                 member_set = frozenset(community_owners)
-                repeated_tokens[(signal, member_set)].append(
-                    _Evidence(signal, member_set, factor, scopes[scope_key])
+                evidence_by_token[(signal, token)].append(
+                    _Evidence(signal, token, member_set, factor, scopes[scope_key])
                 )
+
+    # A stable shared token may recur with a partially changed membership set.
+    # Keep only the exact account intersection across two distinct events. This
+    # preserves the repeated relation without taking a transitive union.
+    repeated_tokens: dict[tuple[str, frozenset[str]], list[_Evidence]] = defaultdict(list)
+    for (signal, _token), observations in sorted(evidence_by_token.items()):
+        by_event: dict[str, list[_Evidence]] = defaultdict(list)
+        for item in observations:
+            by_event[item.source_scope.event_id].append(item)
+        event_ids = sorted(by_event)
+        for left_index, left_event in enumerate(event_ids):
+            for right_event in event_ids[left_index + 1:]:
+                for left in by_event[left_event]:
+                    for right in by_event[right_event]:
+                        common = left.owners.intersection(right.owners)
+                        if len(common) < 2:
+                            continue
+                        members = frozenset(common)
+                        repeated_tokens[(signal, members)].extend((left, right))
 
     # A candidate is anchored to a repeated, verified signal group. We deliberately
     # do not take transitive closure across overlapping groups: that can create a
@@ -99,7 +177,11 @@ def analyze_multi_event(
 
     candidates: list[MultiEventCandidate] = []
     for accounts, evidence_groups in sorted(candidates_by_members.items(), key=lambda item: tuple(sorted(item[0]))):
-        related = [observation for _, observations in evidence_groups for observation in observations]
+        related_by_identity = {}
+        for _, observations in evidence_groups:
+            for item in observations:
+                related_by_identity[(item.signal, item.token, item.source_scope.key, item.owners)] = item
+        related = [related_by_identity[key] for key in sorted(related_by_identity)]
         source_keys = {observation.source_scope.key for observation in related}
         source_scopes = _scope_rows(request, source_keys)
         event_ids = {scope.event_id for scope in source_scopes}
@@ -113,7 +195,7 @@ def analyze_multi_event(
             covered = set().union(*(item.owners for item in rows))
             coverage[signal] = min(len(covered) / len(accounts), 1.0)
             average_damping[signal] = sum(item.weight for item in rows) / len(rows)
-        quantity = quantity_context(None, "POLICY_LIMIT_NOT_INCLUDED_IN_MULTI_EVENT_CONTRACT")
+        quantity = _quantity_for_candidate(accounts, source_scopes, quantity_contexts)
         score = score_exp2(
             len(accounts), coverage, average_damping, quantity, len(event_ids),
             excluded_signals=excluded_by_members.get(accounts, set()),
@@ -125,7 +207,8 @@ def analyze_multi_event(
             for signal in available
         } - {""})
         internal_relationships = []
-        for signal, observations in evidence_groups:
+        for signal in sorted({signal for signal, _ in evidence_groups}):
+            observations = [item for item in related if item.signal == signal]
             relationship_scopes = {item.source_scope.key for item in observations}
             internal_relationships.append(MultiEventRelationship(
                 signalType=signal,
@@ -159,6 +242,7 @@ def analyze_multi_event(
         analysisId=request.analysis_id,
         ledgerVersionSetDigest=request.ledger_version_set_digest,
         scoreVersion=request.score_version,
+        projectionScoreVersion=SCORE_VERSION_EXP2,
         projectionVersion=request.projection_version,
         algorithm="GDS_LOUVAIN",
         algorithmVersion=algorithm_version,

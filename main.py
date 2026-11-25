@@ -73,6 +73,13 @@ async def track1_validation_error(request: Request, exc: RequestValidationError)
             status_code=422,
             content={"detail": [{"code": "INVALID_MULTI_EVENT_ANALYSIS_REQUEST"}]},
         )
+    if request.url.path.startswith("/api/v2/multi-event/jobs"):
+        # Manifest and NDJSON contract errors are deliberately sanitized. In
+        # particular, never echo request payloads containing pseudonymous tokens.
+        return JSONResponse(
+            status_code=422,
+            content={"detail": [{"code": "INVALID_MULTI_EVENT_ARTIFACT_REQUEST"}]},
+        )
     if request.url.path not in {"/api/v1/clusters/analyze", TRACK1_V2_PATH}:
         return await request_validation_exception_handler(request, exc)
     if request.url.path == TRACK1_V2_PATH:

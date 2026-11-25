@@ -9,6 +9,7 @@ load_dotenv()
 
 from services.graph_service import GraphService
 from services.track1_bulk_jobs import BulkJobRepository, S3PrivateObjectStore, Track1BulkJobService
+from services.multi_event_artifact_jobs import MultiEventArtifactJobRepository, MultiEventArtifactJobService
 from services.vlm_service import VLMService
 from services.vlm_service import GeminiProvider
 from core.vlm_errors import VLMProblem
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 _graph_service_instance = None
 _vlm_service_instance = None
 _track1_bulk_job_instance = None
+_multi_event_artifact_job_instance = None
 _lock = asyncio.Lock()
 
 async def get_graph_service() -> GraphService:
@@ -101,3 +103,22 @@ async def get_track1_bulk_job_service() -> Track1BulkJobService:
                     repository, S3PrivateObjectStore(), graph_service,
                 )
     return _track1_bulk_job_instance
+
+
+async def get_multi_event_artifact_job_service() -> MultiEventArtifactJobService:
+    """Create the durable multi-event job coordinator without requiring Neo4j for status reads."""
+    global _multi_event_artifact_job_instance
+    if _multi_event_artifact_job_instance is None:
+        async with _lock:
+            if _multi_event_artifact_job_instance is None:
+                database = os.getenv("TRACK1_BULK_STATE_DB", "runtime/track1-bulk-jobs.sqlite3")
+                repository = MultiEventArtifactJobRepository(Path(database))
+                repository.recover_interrupted()
+                service = MultiEventArtifactJobService(
+                    repository,
+                    lambda: S3PrivateObjectStore(),
+                    get_graph_service,
+                )
+                service.resume_queued()
+                _multi_event_artifact_job_instance = service
+    return _multi_event_artifact_job_instance

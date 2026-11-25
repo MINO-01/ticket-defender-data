@@ -1,8 +1,10 @@
 """별도 다공연 Track 1 분석 경로입니다."""
 
+from typing import Awaitable, Callable
+
 from fastapi import APIRouter, Depends, HTTPException
 
-from core.dependencies import get_graph_service
+from core.dependencies import get_graph_service_factory
 from schemas.multi_event import MultiEventAnalysisRequest, MultiEventAnalysisResponse
 from services.multi_event_analysis import analyze_multi_event
 from services.graph_service import GraphAnalysisUnavailable, GraphService
@@ -14,13 +16,16 @@ router = APIRouter(prefix="/multi-event", tags=["Track 1 (Multi-event investigat
 @router.post("/analyze", response_model=MultiEventAnalysisResponse)
 async def analyze_multi_event_investigation(
     request: MultiEventAnalysisRequest,
-    graph_service: GraphService = Depends(get_graph_service),
+    graph_service_factory: Callable[[], Awaitable[GraphService]] = Depends(get_graph_service_factory),
 ):
     """고정된 원장 범위의 조사 후보를 계산하며 분석 오류를 빈 결과로 바꾸지 않습니다."""
 
     try:
+        graph_service = await graph_service_factory()
         communities, algorithm_version = await graph_service.analyze_multi_event_exp2(request)
         return analyze_multi_event(request, communities, algorithm_version)
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(status_code=422, detail={"code": "INVALID_MULTI_EVENT_ANALYSIS_INPUT"}) from None
     except GraphAnalysisUnavailable:

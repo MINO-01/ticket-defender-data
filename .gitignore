@@ -9,6 +9,13 @@ env/
 .venv/
 
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
 
 # 생성된 대규모 데이터 파일
 *.csv

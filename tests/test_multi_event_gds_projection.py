@@ -109,4 +109,4 @@ def test_multi_event_projects_each_full_performance_scope_separately():
     assert len(driver.opened.project_names) == 2
     assert len(set(driver.opened.project_names)) == 2
     assert all(len(groups) == 1 and len(groups[0]) == 2 for groups in communities.values())
-    assert algorithm_version.startswith("gds-2.6.6;projection-v2.2-exp2-ipwindow-softhub;score-v2-exp2")
+    assert algorithm_version == "gds-2.6.6"

@@ -96,5 +96,5 @@ IP와 결제 신호만으로 회차 간 집단을 연결하지 않는다는 점�
   올렸다. 이전 버전 `score-v2-exp2-multi-event-recurrence`는 퇴역했으며 새 분석 요청에서
   `SCORE_VERSION_RETIRED`로 거절한다. 이전 버전으로 저장된 결과는 읽기 전용이다. 회차 edge
   가중치 버전 `score-v2-exp2`와 projection 버전은 그대로다.
-- 정정 커밋: `feat/multi-performance-raw-intake` 브랜치의 `fix: 다공연 반복 R을 회차 수로
-  정정` 커밋. 해시는 커밋 후 작업 보고에 기록한다.
+- 정정 커밋: `056cc7b8f62f2264025a69e60587959c9acf59c5` (`fix: 다공연 반복 R을 회차 수로 정정하고 같은 공연 다회차 후보
+  허용`, `feat/multi-performance-raw-intake` 브랜치).

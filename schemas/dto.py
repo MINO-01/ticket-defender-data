@@ -234,6 +234,8 @@ class Track1LimitTicketInput(BaseModel):
     address_hash: Optional[HashToken] = Field(default=None, alias="addressHash")
     device_id_hash: Optional[HashToken] = Field(default=None, alias="deviceIdHash")
     ip_hash: Optional[HashToken] = Field(default=None, alias="ipHash")
+    refund_account_hash: Optional[HashToken] = Field(default=None, alias="refundAccountHash")
+    phone_hash: Optional[HashToken] = Field(default=None, alias="phoneHash")
     # 아래 입력 출처 필드는 Backend #79 YAML이 요구한 항목의 선택 필드입니다. 값이 없으면 기존 예매 단위 입력으로 처리합니다.
     # 집계 스냅샷은 이 모델로 받지 않으며 quantityGranularity는 값 정의 전이라 받지 않습니다.
     quantity_input_type: Optional[Literal["INDIVIDUAL_TICKET"]] = Field(default=None, alias="quantityInputType")
@@ -250,6 +252,8 @@ class Track1LimitTicketInput(BaseModel):
             raise PydanticCustomError("invalid_identifier", "Ticket identifiers must not be blank")
         if self.ticket_reference is not None and not self.ticket_reference.strip():
             raise PydanticCustomError("invalid_identifier", "Ticket identifiers must not be blank")
+        if self.ip_network_type is not None and self.ip_hash is None:
+            raise PydanticCustomError("invalid_ip_network_type", "ipNetworkType requires ipHash")
         return self
 
     @property

@@ -6,7 +6,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from api.routes import graph_routes, vlm_routes
+from api.routes import graph_routes, multi_event_routes, vlm_routes
 from core import dependencies
 from core.vlm_errors import VLMBodyTooLarge, VLMProblem, problem_response
 from core.track1_security import Track1AuthGate
@@ -34,6 +34,7 @@ app = FastAPI(
 
 
 TRACK1_V2_PATH = "/api/v2/clusters/analyze"
+MULTI_EVENT_PATH = "/api/v2/multi-event/analyze"
 _TRACK1_V2_CONTRACT_DETAILS = {
     "DUPLICATE_PERFORMANCE_SCOPE": "Each performance scope must be unique",
     "TICKET_SCOPE_MISMATCH": "Each ticket must reference exactly one matching performance scope",
@@ -67,6 +68,18 @@ async def track1_validation_error(request: Request, exc: RequestValidationError)
             VLMProblem(422, "INVALID_REQUEST", "Invalid request", "Request does not match the contract")
         )
         return problem_response(problem, request.state.request_id)
+    if request.url.path == MULTI_EVENT_PATH:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": [{"code": "INVALID_MULTI_EVENT_ANALYSIS_REQUEST"}]},
+        )
+    if request.url.path.startswith("/api/v2/multi-event/jobs"):
+        # Manifest and NDJSON contract errors are deliberately sanitized. In
+        # particular, never echo request payloads containing pseudonymous tokens.
+        return JSONResponse(
+            status_code=422,
+            content={"detail": [{"code": "INVALID_MULTI_EVENT_ARTIFACT_REQUEST"}]},
+        )
     if request.url.path not in {"/api/v1/clusters/analyze", TRACK1_V2_PATH}:
         return await request_validation_exception_handler(request, exc)
     if request.url.path == TRACK1_V2_PATH:
@@ -124,4 +137,5 @@ app.add_middleware(Track1AuthGate)
 app.include_router(graph_routes.router, prefix="/api/v1")
 app.include_router(graph_routes.v2_router, prefix="/api/v2")
 app.include_router(graph_routes.bulk_router, prefix="/api/v2")
+app.include_router(multi_event_routes.router, prefix="/api/v2")
 app.include_router(vlm_routes.router, prefix="/api/v1")

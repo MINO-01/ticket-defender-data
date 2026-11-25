@@ -15,7 +15,17 @@ param(
     [string]$ComparisonOutputDir,
 
     # 지정하면 같은 격리 실행에서 S1~S8 B3 평가를 함께 수행합니다.
-    [string]$SyntheticOutputDir
+    [string]$SyntheticOutputDir,
+
+    # 지정하면 실제 격리 GDS와 NetworkX를 같은 seeded LFR 그래프에서 비교합니다.
+    [string]$LfrOutputPath,
+    [ValidateSet(1000, 5000)]
+    [int]$LfrNodeCount = 1000,
+    [ValidateRange(20261101, 20261110)]
+    [int]$LfrSeed = 20261101,
+    [ValidateSet(0.1, 0.2, 0.3, 0.4, 0.5, 0.6)]
+    [double]$LfrMu = 0.1,
+    [switch]$LfrMatrix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,6 +97,16 @@ try {
     if ($SyntheticOutputDir) {
         & $python -B -m evaluation.track1 synthetic --output-dir $SyntheticOutputDir --gds-uri $env:TD_GDS_TEST_URI
         if ($LASTEXITCODE -ne 0) { throw 'GDS synthetic evaluation failed' }
+    }
+    if ($LfrOutputPath) {
+        $lfrArgs = @('--output', $LfrOutputPath, '--gds-uri', $env:TD_GDS_TEST_URI)
+        if ($LfrMatrix) {
+            $lfrArgs += '--matrix'
+        } else {
+            $lfrArgs += @('--seed', $LfrSeed, '--mu', $LfrMu, '--nodes', $LfrNodeCount)
+        }
+        & $python -B -m evaluation.track1.lfr_parity @lfrArgs
+        if ($LASTEXITCODE -ne 0) { throw 'V1A LFR parity evaluation failed' }
     }
 }
 finally {

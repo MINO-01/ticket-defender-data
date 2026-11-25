@@ -15,6 +15,7 @@ from .metrics import evaluate
 from .models import BaselineOutput, EvaluationDataset
 from .results import default_results_dir, write_results
 from .synthetic import DEFAULT_SEED, build_synthetic_suite
+from .exp2_compare import compare_exp2
 
 
 def _repository_root() -> Path:
@@ -104,6 +105,10 @@ def run_ieee(args: argparse.Namespace) -> dict[str, Path]:
     )
 
 
+def run_exp2_compare(args: argparse.Namespace) -> dict[str, Path]:
+    return {"result": compare_exp2(args.tickets, args.truth, args.output_dir)}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline Track 1 effectiveness evaluation")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -124,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     ieee.add_argument("--max-rows", type=int, default=5000, help="Explicit small transaction sample; default: 5000")
     ieee.add_argument("--full", action="store_true", help="Explicitly permit a full source read; never the default")
     ieee.set_defaults(handler=run_ieee)
+
+    compare = subparsers.add_parser("compare-exp2", help="Compare fixed v2 and exp2 inputs against separate truth")
+    compare.add_argument("--tickets", type=Path, required=True, help="Pseudonymous ticket JSON outside the repository")
+    compare.add_argument("--truth", type=Path, required=True, help="Separate account-to-role truth JSON outside the repository")
+    compare.add_argument("--output-dir", type=Path, required=True, help="External output directory")
+    compare.set_defaults(handler=run_exp2_compare)
     return parser
 
 

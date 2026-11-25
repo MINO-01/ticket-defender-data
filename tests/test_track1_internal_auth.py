@@ -5,16 +5,19 @@ import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
+from uuid import uuid4
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from core.dependencies import get_graph_service
+from core.dependencies import get_graph_service, get_graph_service_factory
 from main import app
 from schemas.dto import Track1AnalysisResponse
 from services.graph_service import GraphAnalysisUnavailable, GraphResultInvalid
 
 
 ANALYZE = "/api/v1/clusters/analyze"
+MULTI_EVENT_ANALYZE = "/api/v2/multi-event/analyze"
 MACRO = "/api/v1/clusters/macro"
 VLM_PATH = "/api/v1/parse/ticket-image"
 TRACK1_KEY = "track1-synthetic-key-" + "k" * 24
@@ -58,6 +61,37 @@ class RecordingGraphService:
         self.calls.append("detect_macro_clusters")
         return []
 
+    async def analyze_multi_event_exp2(self, request):
+        self.calls.append("analyze_multi_event_exp2")
+        if self.error:
+            raise self.error
+        return {scope.key: [] for scope in request.ledger_scopes}, "gds-test;projection-test;score-test"
+
+
+def multi_event_payload():
+    first_performance, second_performance = str(uuid4()), str(uuid4())
+    first_ledger, second_ledger = str(uuid4()), str(uuid4())
+    return {
+        "analysisId": str(uuid4()),
+        "tenantId": str(uuid4()),
+        "ledgerVersionSetDigest": "d" * 64,
+        "analysisAsOf": "2026-01-01T00:00:00Z",
+        "analysisStartAt": "2025-12-01T00:00:00Z",
+        "analysisEndAt": "2026-01-01T00:00:00Z",
+        "scoreVersion": "score-v2-exp2-multi-event-recurrence",
+        "projectionVersion": "projection-v2.2-exp2-ipwindow-softhub",
+        "ledgerScopes": [
+            {"eventId": "event-a", "performanceId": first_performance, "ledgerVersionId": first_ledger, "sourceBatchId": "batch-a"},
+            {"eventId": "event-b", "performanceId": second_performance, "ledgerVersionId": second_ledger, "sourceBatchId": "batch-b"},
+        ],
+        "tickets": [{
+            "accountId": "a" * 64, "reservationNo": "b" * 64, "eventId": "event-a",
+            "performanceId": first_performance, "ledgerVersionId": first_ledger,
+            "supplierNamespace": "supplier-a", "hmacPurpose": "TRACK1_CONNECTION",
+            "hmacKeyVersion": "key-v1", "sourceVersion": "source-v1", "refundAccountHash": "e" * 64,
+        }],
+    }
+
 
 class Track1InternalAuthTests(unittest.TestCase):
     def setUp(self):
@@ -69,12 +103,23 @@ class Track1InternalAuthTests(unittest.TestCase):
         self.env.start()
         self.service = RecordingGraphService()
         self.dependency_calls = 0
+        self.factory_error = None
 
         def provide():
             self.dependency_calls += 1
             return self.service
 
+        def provide_factory():
+            async def acquire():
+                self.dependency_calls += 1
+                if self.factory_error is not None:
+                    raise self.factory_error
+                return self.service
+
+            return acquire
+
         app.dependency_overrides[get_graph_service] = provide
+        app.dependency_overrides[get_graph_service_factory] = provide_factory
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -128,6 +173,97 @@ class Track1InternalAuthTests(unittest.TestCase):
         with TestClient(app, root_path="/td") as client:
             response = client.post(ANALYZE, json=PAYLOAD)
         self.assertEqual(response.status_code, 401)
+        self.assert_graph_untouched()
+
+    def test_multi_event_path_is_gated_before_body_validation(self):
+        response = self.client.post(MULTI_EVENT_ANALYZE, content="{", headers={"content-type": "application/json"})
+        self.assertEqual(response.status_code, 401)
+        response = self.client.post(MULTI_EVENT_ANALYZE, json={}, headers={"X-TD-Track1-Key": TRACK1_KEY})
+        self.assertEqual(response.status_code, 422)
+        self.assert_graph_untouched()
+
+    def test_multi_event_missing_wrong_and_duplicate_credentials_do_not_acquire_graph(self):
+        cases = {
+            "missing": [],
+            "wrong": [("X-TD-Track1-Key", "x" * 40)],
+            "duplicate": [("X-TD-Track1-Key", TRACK1_KEY), ("X-TD-Track1-Key", TRACK1_KEY)],
+        }
+        for name, headers in cases.items():
+            with self.subTest(case=name):
+                response = self.client.post(MULTI_EVENT_ANALYZE, json=multi_event_payload(), headers=headers)
+                self.assertEqual(response.status_code, 401)
+        self.assert_graph_untouched()
+
+    def test_multi_event_authentication_configuration_error_does_not_acquire_graph(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TRACK1_INTERNAL_SHARED_SECRET", None)
+            response = self.client.post(
+                MULTI_EVENT_ANALYZE, json=multi_event_payload(), headers={"X-TD-Track1-Key": TRACK1_KEY},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"detail": [{"code": "TRACK1_AUTH_UNCONFIGURED"}]})
+        self.assert_graph_untouched()
+
+    def test_multi_event_trailing_slash_and_root_path_remain_gated(self):
+        response = self.client.post(MULTI_EVENT_ANALYZE + "/", json=multi_event_payload(), follow_redirects=False)
+        self.assertEqual(response.status_code, 401)
+        with TestClient(app, root_path="/td") as client:
+            response = client.post(MULTI_EVENT_ANALYZE, json=multi_event_payload())
+        self.assertEqual(response.status_code, 401)
+        self.assert_graph_untouched()
+
+    def test_multi_event_validated_body_acquires_service_and_runs_analysis(self):
+        response = self.client.post(
+            MULTI_EVENT_ANALYZE, json=multi_event_payload(), headers={"X-TD-Track1-Key": TRACK1_KEY},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["candidates"], [])
+        self.assertEqual(self.dependency_calls, 1)
+        self.assertEqual(self.service.calls, ["analyze_multi_event_exp2"])
+
+    def test_multi_event_gds_and_http_service_failures_keep_503(self):
+        cases = (GraphAnalysisUnavailable(), HTTPException(status_code=503, detail="Service unavailable"))
+        for error in cases:
+            with self.subTest(error=type(error).__name__):
+                self.service = RecordingGraphService(error)
+                self.factory_error = error if isinstance(error, HTTPException) else None
+                if not isinstance(error, HTTPException):
+                    self.service.error = error
+                response = self.client.post(
+                    MULTI_EVENT_ANALYZE, json=multi_event_payload(), headers={"X-TD-Track1-Key": TRACK1_KEY},
+                )
+                self.assertEqual(response.status_code, 503)
+                self.assertNotIn("candidates", response.text)
+        self.assertEqual(self.dependency_calls, 2)
+
+    def test_multi_event_analysis_failure_is_not_an_empty_success(self):
+        self.service = RecordingGraphService(RuntimeError("synthetic analysis failure"))
+        response = self.client.post(
+            MULTI_EVENT_ANALYZE, json=multi_event_payload(), headers={"X-TD-Track1-Key": TRACK1_KEY},
+        )
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json(), {"detail": {"code": "MULTI_EVENT_ANALYSIS_FAILED"}})
+        self.assertNotIn("candidates", response.text)
+        self.assertEqual(self.dependency_calls, 1)
+
+    def test_multi_event_validation_error_does_not_echo_input_tokens_or_secrets(self):
+        sentinels = (
+            "RAW_ANALYSIS_IDENTIFIER_SENTINEL", "RAW_TENANT_IDENTIFIER_SENTINEL",
+            "PSEUDONYM_ACCOUNT_SENTINEL", "HMAC_TOKEN_SENTINEL", TRACK1_KEY,
+        )
+        response = self.client.post(
+            MULTI_EVENT_ANALYZE,
+            json={
+                "analysisId": sentinels[0], "tenantId": sentinels[1],
+                "ledgerVersionSetDigest": sentinels[3],
+                "tickets": [{"accountId": sentinels[2], "refundAccountHash": sentinels[3]}],
+            },
+            headers={"X-TD-Track1-Key": TRACK1_KEY},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {"detail": [{"code": "INVALID_MULTI_EVENT_ANALYSIS_REQUEST"}]})
+        for sentinel in sentinels:
+            self.assertNotIn(sentinel, response.text)
         self.assert_graph_untouched()
 
     def test_missing_short_or_shared_secret_fails_closed_with_503(self):

@@ -1,0 +1,2 @@
+# Optional V1A LFR evaluation dependency. Keep separate from production/runtime requirements.
+networkx==3.7

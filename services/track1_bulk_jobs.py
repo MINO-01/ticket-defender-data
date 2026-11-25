@@ -59,6 +59,10 @@ class JobCancelled(BulkJobError):
 class GdsResourceExhausted(BulkJobError):
     code = "GDS_RESOURCE_EXHAUSTED"
 
+    def __init__(self, code: str = "GDS_RESOURCE_EXHAUSTED") -> None:
+        self.code = code
+        super().__init__(code)
+
 
 class PrivateObjectStore:
     """Only a configured bucket/prefix can be read; callers never supply a URL."""

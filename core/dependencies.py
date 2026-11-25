@@ -55,6 +55,12 @@ async def get_graph_service() -> GraphService:
                     
     return _graph_service_instance
 
+
+def get_graph_service_factory():
+    """Return a lazy service getter without initializing Neo4j during dependency solving."""
+    return get_graph_service
+
+
 async def get_vlm_service() -> VLMService:
     """Return a provider only after explicit external-transfer configuration."""
     global _vlm_service_instance

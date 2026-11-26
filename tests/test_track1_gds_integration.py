@@ -305,5 +305,58 @@ class Track1GdsIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.graph_names(), before_graphs)
 
 
+    async def test_multi_performance_same_event_runs_real_louvain_per_performance(self):
+        """같은 공연의 두 회차를 회차별 실제 GDS Louvain으로 돌려 다회차 후보를 만듭니다."""
+        from schemas.multi_event import MultiEventAnalysisRequest
+        from services.multi_event_analysis import analyze_multi_event
+
+        before_graphs = await self.graph_names()
+        before_counts = await self.store_counts()
+        scopes = [
+            {"eventId": "event-1", "performanceId": str(uuid4()), "ledgerVersionId": str(uuid4()),
+             "sourceBatchId": f"batch-{index}"}
+            for index in range(2)
+        ]
+        rows = []
+        for index, scope in enumerate(scopes):
+            for account, signals in (
+                ("a", {"deviceIdHash": "d" * 64}),
+                ("b", {"deviceIdHash": "d" * 64}),
+                ("c", {"ipHash": "7" * 64, "ipNetworkType": "CORPORATE_EDU"}),
+                ("e", {"ipHash": "7" * 64, "ipNetworkType": "CORPORATE_EDU"}),
+            ):
+                rows.append({
+                    "accountId": account * 64,
+                    "reservationNo": hashlib.sha256(f"{index}|{account}".encode()).hexdigest(),
+                    "eventId": scope["eventId"], "performanceId": scope["performanceId"],
+                    "ledgerVersionId": scope["ledgerVersionId"], "supplierNamespace": "supplier-a",
+                    "hmacPurpose": "TRACK1_CONNECTION", "hmacKeyVersion": "key-v1",
+                    "sourceVersion": "source-v1", "purchasedAt": "2026-01-01T00:00:00Z", **signals,
+                })
+        analysis_request = MultiEventAnalysisRequest.model_validate({
+            "analysisId": str(uuid4()), "tenantId": str(uuid4()), "ledgerVersionSetDigest": "f" * 64,
+            "analysisAsOf": "2026-01-02T00:00:00Z", "analysisStartAt": "2025-12-01T00:00:00Z",
+            "analysisEndAt": "2026-01-02T00:00:00Z",
+            "scoreVersion": "score-v2-exp2-multi-performance-recurrence",
+            "projectionVersion": "projection-v2.2-exp2-ipwindow-softhub",
+            "ledgerScopes": scopes, "tickets": rows,
+        })
+
+        communities, algorithm_version = await self.service.analyze_multi_event_exp2(analysis_request)
+        result = analyze_multi_event(analysis_request, communities, algorithm_version)
+
+        self.assertEqual(algorithm_version, "gds-2.6.6")
+        self.assertEqual(len(self.service.driver.projected), 2)
+        members = {frozenset(candidate.member_account_ids): candidate for candidate in result.candidates}
+        self.assertEqual(set(members), {frozenset({"a" * 64, "b" * 64}), frozenset({"c" * 64, "e" * 64})})
+        device = members[frozenset({"a" * 64, "b" * 64})]
+        self.assertEqual(device.distinct_event_count, 1)
+        self.assertEqual(device.distinct_performance_count, 2)
+        self.assertEqual(device.available_signals, ["device_id_hash"])
+        ip_only = members[frozenset({"c" * 64, "e" * 64})]
+        self.assertEqual([relation.signal_type for relation in ip_only.relationships], ["stable_account_cocluster"])
+        self.assertEqual(await self.graph_names(), before_graphs)
+        self.assertEqual(await self.store_counts(), before_counts)
+
 if __name__ == "__main__":
     unittest.main()

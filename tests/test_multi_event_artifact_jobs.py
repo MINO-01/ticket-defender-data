@@ -83,7 +83,7 @@ def _manifest_payload(scopes, raw, count):
         "analysisAsOf": now.isoformat(),
         "analysisStartAt": "2025-12-01T00:00:00Z",
         "analysisEndAt": now.isoformat(),
-        "scoreVersion": "score-v2-exp2-multi-event-recurrence",
+        "scoreVersion": "score-v2-exp2-multi-performance-recurrence",
         "projectionVersion": "projection-v2.2-exp2-ipwindow-softhub",
         "supplierNamespace": "supplier-a",
         "hmacPurpose": "TRACK1_CONNECTION",
@@ -110,7 +110,7 @@ def test_small_json_contract_does_not_require_internal_source_event_id():
         "analysisId": str(uuid4()), "tenantId": str(uuid4()),
         "ledgerVersionSetDigest": _hash("d"), "analysisAsOf": now.isoformat(),
         "analysisStartAt": "2025-12-01T00:00:00Z", "analysisEndAt": now.isoformat(),
-        "scoreVersion": "score-v2-exp2-multi-event-recurrence",
+        "scoreVersion": "score-v2-exp2-multi-performance-recurrence",
         "projectionVersion": "projection-v2.2-exp2-ipwindow-softhub",
         "ledgerScopes": scopes,
         "tickets": [{**_ticket(scopes[0], "a", 1, 1)}],
@@ -294,15 +294,18 @@ def test_async_worker_ingests_stores_candidates_and_serves_complete_pages(tmp_pa
     candidate_by_members = {row.distinct_account_count: row for row in candidates.records}
     assert set(candidate_by_members) == {2, 3}
     three_member_candidate = candidate_by_members[3]
-    assert three_member_candidate.available_signals == ["phone_hash"]
+    # 점수 구성은 구성원이 실제로 공유한 모든 exp2 신호를 씁니다. 기기는 3명 중 2명만 공유합니다.
+    assert three_member_candidate.available_signals == ["device_id_hash", "phone_hash"]
     two_member_candidate = candidate_by_members[2]
-    assert two_member_candidate.available_signals == ["device_id_hash"]
+    assert two_member_candidate.available_signals == ["device_id_hash", "phone_hash"]
+    expected_relations = {3: ["phone_hash", "stable_account_cocluster"], 2: ["device_id_hash"]}
 
     for candidate in candidates.records:
         members = repository.member_page(accepted.job_id, candidate.candidate_id, None, 10)
         relations = repository.relationship_page(accepted.job_id, candidate.candidate_id, None, 10)
         assert members.total_count == candidate.distinct_account_count
-        assert relations.total_count == 1
+        assert [row.signal_type for row in relations.records] == expected_relations[candidate.distinct_account_count]
+        assert relations.total_count == len(expected_relations[candidate.distinct_account_count])
         assert relations.records[0].source_scope_count == 2
         assert relations.records[0].account_count == len(members.records)
     duplicate = repository.create("worker-idempotency", manifest)
@@ -327,3 +330,193 @@ def test_object_version_mismatch_is_durable_input_rejection(tmp_path, monkeypatc
     status = repository.status(accepted.job_id)
     assert status.status == "INPUT_REJECTED"
     assert status.failure_code == "OBJECT_VERSION_MISMATCH"
+
+
+# 회차 단위 후보, 같은 계정 반복 동시 군집, 퇴역 점수 버전, JSON 경로와의 패리티 테스트입니다.
+
+PURCHASED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+
+
+def _scopes_for(events):
+    internal = {event: str(uuid4()) for event in set(events)}
+    return [
+        {
+            "eventId": event, "sourceEventId": internal[event], "performanceId": str(uuid4()),
+            "ledgerVersionId": str(uuid4()), "sourceBatchId": f"batch-{index}",
+        }
+        for index, event in enumerate(events)
+    ]
+
+
+def _parity_rows(scopes):
+    """세 회차(공연 2개)에 걸친 합성 fixture입니다. 토큰은 가짜 64자리 16진수입니다."""
+    first, second, third = scopes
+    rows = []
+
+    def add(scope, account, **signals):
+        ordinal = sum(1 for row in rows if row["performanceId"] == scope["performanceId"]) + 1
+        reservation = f"{scope['performanceId']}|{ordinal}"
+        row = _ticket(scope, account, 0, ordinal, **{"phoneHash": None, "purchasedAt": PURCHASED_AT, **signals})
+        row["reservationNo"] = hashlib.sha256(reservation.encode()).hexdigest()
+        rows.append(row)
+
+    for scope in (first, second, third):
+        for account in ("a", "b"):
+            extra = {"deviceIdHash": _hash("d")} if scope is first else {}
+            add(scope, account, refundAccountHash=_hash("e"), **extra)
+    for scope in (first, second):
+        for account in ("c", "d", "e"):
+            extra = {"paymentHash": _hash("8")} if scope is second and account in {"c", "d"} else {}
+            add(scope, account, ipHash=_hash("7"), ipNetworkType="CORPORATE_EDU", **extra)
+    for account in ("f", "1"):
+        add(third, account, phoneHash=_hash("f"))
+    return rows
+
+
+def _run_artifact(tmp_path, monkeypatch, scopes, rows, name):
+    raw, manifest = _artifact(scopes, rows)
+    repository = MultiEventArtifactJobRepository(tmp_path / f"{name}.sqlite")
+    service = MultiEventArtifactJobService(repository, lambda: _Store([raw]), lambda: _Graph())
+    monkeypatch.setattr(artifact_jobs.asyncio, "to_thread", _inline_to_thread)
+    accepted = repository.create(name, manifest)
+    _run_immediate(service._run(accepted.job_id))
+    return repository, accepted.job_id, manifest
+
+
+def test_json_and_artifact_paths_produce_identical_candidates(tmp_path, monkeypatch):
+    from services.multi_event_analysis import analyze_multi_event
+
+    scopes = _scopes_for(["event-0", "event-0", "event-1"])
+    rows = _parity_rows(scopes)
+    repository, job_id, manifest = _run_artifact(tmp_path, monkeypatch, scopes, rows, "parity")
+    assert repository.status(job_id).status == "COMPLETED"
+
+    request = MultiEventAnalysisRequest.model_validate({
+        **{key: value for key, value in _manifest_payload(scopes, b"", len(rows)).items()
+           if key in {"analysisAsOf", "analysisStartAt", "analysisEndAt", "scoreVersion", "projectionVersion"}},
+        "analysisId": manifest.analysis_id, "tenantId": manifest.tenant_id,
+        "ledgerVersionSetDigest": manifest.ledger_version_set_digest,
+        "ledgerScopes": [{key: value for key, value in scope.items() if key != "sourceEventId"} for scope in scopes],
+        "tickets": rows,
+    })
+    # _Graph와 같은 가정: 회차마다 투영된 계정 전체가 하나의 GDS 군집입니다.
+    projected = {}
+    for scope in request.ledger_scopes:
+        scope_id = next(index for index, item in enumerate(manifest.ledger_scopes) if item.key == scope.key)
+        projected[scope.key] = [frozenset(row["account_id"] for row in repository.account_page(job_id, scope_id, 0, 500))]
+    json_result = analyze_multi_event(request, projected, "gds-test")
+
+    def summarize_json(candidate):
+        return {
+            "id": candidate.candidate_id,
+            "members": tuple(candidate.member_account_ids),
+            "summary": candidate.model_dump(mode="json", by_alias=True, exclude={"member_account_ids", "relationships"}),
+            "relationships": sorted(
+                (relation.signal_type, tuple(sorted(scope.performance_id for scope in relation.source_scopes)))
+                for relation in candidate.relationships
+            ),
+        }
+
+    def summarize_artifact(summary):
+        members = repository.member_page(job_id, summary.candidate_id, None, 500)
+        relations = repository.relationship_page(job_id, summary.candidate_id, None, 500)
+        return {
+            "id": summary.candidate_id,
+            "members": tuple(members.records),
+            "summary": summary.model_dump(mode="json", by_alias=True),
+            "relationships": sorted(
+                (relation.signal_type, tuple(sorted(scope.performance_id for scope in relation.source_scopes)))
+                for relation in relations.records
+            ),
+        }
+
+    artifact_records = repository.candidate_page(job_id, None, 500).records
+    assert [summarize_artifact(item) for item in artifact_records] == [summarize_json(item) for item in json_result.candidates]
+    assert {len(item.member_account_ids) for item in json_result.candidates} == {2, 5}
+    five = next(item for item in json_result.candidates if len(item.member_account_ids) == 5)
+    assert [relation.signal_type for relation in five.relationships] == ["stable_account_cocluster"]
+    assert "ip_window:CORPORATE_EDU" in five.available_signals
+    two = next(item for item in json_result.candidates if len(item.member_account_ids) == 2)
+    assert two.distinct_event_count == 2
+    assert two.distinct_performance_count == 3
+    assert two.score_breakdown.recurrence == pytest.approx(2 / 3)
+
+
+def test_manifest_accepts_one_event_with_two_performances_and_rejects_one_performance():
+    scopes = _scopes_for(["event-0", "event-0"])
+    manifest = MultiEventArtifactManifest.model_validate(_manifest_payload(scopes, b"{}\n", 1))
+    assert {scope.event_id for scope in manifest.ledger_scopes} == {"event-0"}
+
+    same_performance = _scopes_for(["event-0", "event-0"])
+    same_performance[1]["performanceId"] = same_performance[0]["performanceId"]
+    with pytest.raises(ValidationError) as error:
+        MultiEventArtifactManifest.model_validate(_manifest_payload(same_performance, b"{}\n", 1))
+    assert "multi_event_scope_required" in {item["type"] for item in error.value.errors()}
+
+
+def test_retired_score_version_is_rejected_for_new_jobs_but_stored_jobs_stay_readable(tmp_path, monkeypatch):
+    scopes = _scopes()
+    retired = {**_manifest_payload(scopes, b"{}\n", 1), "scoreVersion": "score-v2-exp2-multi-event-recurrence"}
+    with pytest.raises(ValidationError) as error:
+        MultiEventArtifactManifest.model_validate(retired)
+    assert error.value.errors()[0]["type"] == "SCORE_VERSION_RETIRED"
+
+    raw, manifest = _artifact(scopes, [_ticket(scopes[0], "a", 1, 1)])
+    repository = MultiEventArtifactJobRepository(tmp_path / "retired.sqlite")
+    accepted = repository.create("retired-stored", manifest)
+    stored = json.loads(manifest.model_dump_json(by_alias=True))
+    stored["scoreVersion"] = "score-v2-exp2-multi-event-recurrence"
+    with sqlite3.connect(repository.path) as db:
+        db.execute("UPDATE mei_artifact_jobs SET manifest_json=? WHERE job_id=?", (json.dumps(stored), accepted.job_id))
+    assert repository.manifest(accepted.job_id).score_version == "score-v2-exp2-multi-event-recurrence"
+
+    service = MultiEventArtifactJobService(repository, lambda: _Store([raw]), lambda: _Graph())
+    monkeypatch.setattr(artifact_jobs.asyncio, "to_thread", _inline_to_thread)
+    _run_immediate(service._run(accepted.job_id))
+    status = repository.status(accepted.job_id)
+    assert status.status == "INPUT_REJECTED"
+    assert status.failure_code == "SCORE_VERSION_RETIRED"
+
+
+def test_cocluster_comparison_limit_fails_job_without_partial_results(tmp_path, monkeypatch):
+    scopes = _scopes_for(["event-0", "event-0"])
+    rows = [
+        _ticket(scope, account, index * 10 + ordinal, ordinal, phoneHash=None, purchasedAt=PURCHASED_AT,
+                ipHash=_hash("7"), ipNetworkType="CORPORATE_EDU")
+        for index, scope in enumerate(scopes) for ordinal, account in enumerate(("a", "b", "c"), start=1)
+    ]
+    monkeypatch.setattr(artifact_jobs, "MAX_RECURRENCE_COMPARISONS", 2)
+    repository, job_id, _manifest = _run_artifact(tmp_path, monkeypatch, scopes, rows, "cocluster-limit")
+    status = repository.status(job_id)
+    assert status.status == "FAILED"
+    assert status.failure_code == "RECURRENCE_COMPARISON_LIMIT_EXCEEDED"
+    with pytest.raises(HTTPException) as error:
+        repository.candidate_page(job_id, None, 10)
+    assert error.value.status_code == 409
+
+
+def test_artifact_ip_window_only_cocluster_candidate_and_dormitory_counterexample(tmp_path, monkeypatch):
+    scopes = _scopes_for(["event-0", "event-1"])
+    stable = [
+        _ticket(scope, account, index * 10 + ordinal, ordinal, phoneHash=None, purchasedAt=PURCHASED_AT,
+                ipHash=_hash("7"), ipNetworkType="CORPORATE_EDU")
+        for index, scope in enumerate(scopes) for ordinal, account in enumerate(("a", "b", "c"), start=1)
+    ]
+    repository, job_id, _manifest = _run_artifact(tmp_path, monkeypatch, scopes, stable, "stable-ip")
+    records = repository.candidate_page(job_id, None, 10).records
+    assert len(records) == 1
+    assert records[0].available_signals == ["ip_window:CORPORATE_EDU"]
+    assert records[0].score_breakdown.score == pytest.approx(0.1514, abs=1e-4)
+    relations = repository.relationship_page(job_id, records[0].candidate_id, None, 10).records
+    assert [relation.signal_type for relation in relations] == ["stable_account_cocluster"]
+
+    dorm_scopes = _scopes_for(["event-0", "event-1"])
+    dorm = [
+        _ticket(scope, account, index * 10 + ordinal, ordinal, phoneHash=None, purchasedAt=PURCHASED_AT,
+                ipHash=_hash("7"), ipNetworkType="CORPORATE_EDU")
+        for index, (scope, accounts) in enumerate(zip(dorm_scopes, (("a", "b", "c"), ("c", "d", "e"))))
+        for ordinal, account in enumerate(accounts, start=1)
+    ]
+    repository, job_id, _manifest = _run_artifact(tmp_path, monkeypatch, dorm_scopes, dorm, "dorm-ip")
+    assert repository.status(job_id).status == "COMPLETED"
+    assert repository.candidate_page(job_id, None, 10).total_count == 0

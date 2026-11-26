@@ -17,6 +17,7 @@ from schemas.multi_event import (
     UUIDText,
 )
 from services.multi_event_analysis import analyze_multi_event
+from services.multi_event_candidates import RecurrenceComparisonLimit
 from services.graph_service import GraphAnalysisUnavailable, GraphService
 
 
@@ -94,6 +95,9 @@ async def analyze_multi_event_investigation(
         return analyze_multi_event(request, communities, algorithm_version)
     except HTTPException:
         raise
+    except RecurrenceComparisonLimit as exc:
+        # 비교 상한을 넘으면 후보를 자르지 않고 분석 전체를 실패시킵니다.
+        raise HTTPException(status_code=422, detail={"code": exc.code}) from None
     except ValueError:
         raise HTTPException(status_code=422, detail={"code": "INVALID_MULTI_EVENT_ANALYSIS_INPUT"}) from None
     except GraphAnalysisUnavailable:

@@ -78,3 +78,23 @@ GDS를 실행하지 못한 경우 NetworkX 대체 결과를 GDS PASS로 표기�
 
 알려진 한계는 10분 창 경계, 정책 부재에서의 수량 중립값, 회차 하나일 때 `R=0`, 그리고
 IP와 결제 신호만으로 회차 간 집단을 연결하지 않는다는 점이다.
+
+## 정오표
+
+### E1. 다공연 후보의 R 입력값 (2026-11-25)
+
+- 사전 등록 정의: `R = min((performanceCount - 1) / 3, 1)`. 반복 횟수는 서로 다른
+  회차(performance) 수다.
+- 구현 오류: 다공연 후보 경로(`score-v2-exp2-multi-event-recurrence`)는 `score_exp2`의
+  `p_count`에 서로 다른 event 수를 넘겼다. 같은 공연의 여러 회차는 R에 반영되지 않았고,
+  공연 2개 회차 4개 후보는 R이 1.0이 아니라 0.333으로 계산됐다.
+- 정정: 다공연 후보는 출처 scope의 서로 다른 performance 수를 `p_count`로 넘긴다. 회차별
+  exp2 경로의 R 계산과 위 파라미터 표, 회귀 오라클 11개 값은 바꾸지 않았다.
+- 정정 시점: 독립 holdout 평가 전이다. 정정 전 다공연 결과로 파라미터나 임계값을 조정하지
+  않았다.
+- 후보 모델 변경과 함께 다공연 점수 버전을 `score-v2-exp2-multi-performance-recurrence`로
+  올렸다. 이전 버전 `score-v2-exp2-multi-event-recurrence`는 퇴역했으며 새 분석 요청에서
+  `SCORE_VERSION_RETIRED`로 거절한다. 이전 버전으로 저장된 결과는 읽기 전용이다. 회차 edge
+  가중치 버전 `score-v2-exp2`와 projection 버전은 그대로다.
+- 정정 커밋: `056cc7b8f62f2264025a69e60587959c9acf59c5` (`fix: 다공연 반복 R을 회차 수로 정정하고 같은 공연 다회차 후보
+  허용`, `feat/multi-performance-raw-intake` 브랜치).

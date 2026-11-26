@@ -91,7 +91,7 @@ def _request():
     return MultiEventAnalysisRequest.model_validate({
         "analysisId": str(uuid4()), "tenantId": str(uuid4()), "ledgerVersionSetDigest": "d" * 64,
         "analysisAsOf": now.isoformat(), "analysisStartAt": "2025-12-01T00:00:00Z", "analysisEndAt": now.isoformat(),
-        "scoreVersion": "score-v2-exp2-multi-event-recurrence",
+        "scoreVersion": "score-v2-exp2-multi-performance-recurrence",
         "projectionVersion": "projection-v2.2-exp2-ipwindow-softhub", "ledgerScopes": scopes, "tickets": tickets,
     })
 

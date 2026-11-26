@@ -68,18 +68,17 @@ async def track1_validation_error(request: Request, exc: RequestValidationError)
             VLMProblem(422, "INVALID_REQUEST", "Invalid request", "Request does not match the contract")
         )
         return problem_response(problem, request.state.request_id)
-    if request.url.path == MULTI_EVENT_PATH:
-        return JSONResponse(
-            status_code=422,
-            content={"detail": [{"code": "INVALID_MULTI_EVENT_ANALYSIS_REQUEST"}]},
-        )
-    if request.url.path.startswith("/api/v2/multi-event/jobs"):
+    if request.url.path == MULTI_EVENT_PATH or request.url.path.startswith("/api/v2/multi-event/jobs"):
         # Manifest and NDJSON contract errors are deliberately sanitized. In
         # particular, never echo request payloads containing pseudonymous tokens.
-        return JSONResponse(
-            status_code=422,
-            content={"detail": [{"code": "INVALID_MULTI_EVENT_ARTIFACT_REQUEST"}]},
-        )
+        # 퇴역 점수 버전은 입력 값 없이 고정 코드만 알려 호출자가 버전을 올리게 합니다.
+        if any(error.get("type") == "SCORE_VERSION_RETIRED" for error in exc.errors()):
+            code = "SCORE_VERSION_RETIRED"
+        elif request.url.path == MULTI_EVENT_PATH:
+            code = "INVALID_MULTI_EVENT_ANALYSIS_REQUEST"
+        else:
+            code = "INVALID_MULTI_EVENT_ARTIFACT_REQUEST"
+        return JSONResponse(status_code=422, content={"detail": [{"code": code}]})
     if request.url.path not in {"/api/v1/clusters/analyze", TRACK1_V2_PATH}:
         return await request_validation_exception_handler(request, exc)
     if request.url.path == TRACK1_V2_PATH:

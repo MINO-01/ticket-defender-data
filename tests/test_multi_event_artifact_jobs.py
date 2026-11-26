@@ -410,7 +410,8 @@ def test_json_and_artifact_paths_produce_identical_candidates(tmp_path, monkeypa
         return {
             "id": candidate.candidate_id,
             "members": tuple(candidate.member_account_ids),
-            "summary": candidate.model_dump(mode="json", by_alias=True, exclude={"member_account_ids", "relationships"}),
+            "summary": candidate.model_dump(mode="json", by_alias=True, exclude={"member_account_ids", "relationships", "member_reasons"}),
+            "member_reasons": [item.model_dump(mode="json", by_alias=True) for item in candidate.member_reasons],
             "relationships": sorted(
                 (relation.signal_type, tuple(sorted(scope.performance_id for scope in relation.source_scopes)))
                 for relation in candidate.relationships
@@ -424,6 +425,7 @@ def test_json_and_artifact_paths_produce_identical_candidates(tmp_path, monkeypa
             "id": summary.candidate_id,
             "members": tuple(members.records),
             "summary": summary.model_dump(mode="json", by_alias=True),
+            "member_reasons": [item.model_dump(mode="json", by_alias=True) for item in repository.member_reason_page(job_id, summary.candidate_id, None, 500).records],
             "relationships": sorted(
                 (relation.signal_type, tuple(sorted(scope.performance_id for scope in relation.source_scopes)))
                 for relation in relations.records
@@ -509,6 +511,11 @@ def test_artifact_ip_window_only_cocluster_candidate_and_dormitory_counterexampl
     assert records[0].score_breakdown.score == pytest.approx(0.1514, abs=1e-4)
     relations = repository.relationship_page(job_id, records[0].candidate_id, None, 10).records
     assert [relation.signal_type for relation in relations] == ["stable_account_cocluster"]
+    member_reasons = repository.member_reason_page(job_id, records[0].candidate_id, None, 10).records
+    for member in member_reasons:
+        recurrence = next(reason for reason in member.reasons if reason.code == "REPEATED_PERFORMANCES")
+        assert recurrence.peer_count == 0
+        assert set(recurrence.performances) == {scope["performanceId"] for scope in scopes}
 
     dorm_scopes = _scopes_for(["event-0", "event-1"])
     dorm = [

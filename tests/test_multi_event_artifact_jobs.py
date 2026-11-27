@@ -197,7 +197,7 @@ def test_artifact_stream_accepts_more_than_legacy_json_limit_with_light_sink(tmp
 
     def light_sink(_db, _job_id, line, row_no, manifest, _scopes, supplier_namespace, key_version):
         assert line == b"{}"
-        return row_no + 1, supplier_namespace or manifest.supplier_namespace, key_version or manifest.hmac_key_version
+        return row_no + 1, supplier_namespace or manifest.supplier_namespace, key_version or manifest.hmac_key_version, False
 
     # This contract test exercises SHA/count streaming above the legacy limit
     # without paying for 50,001 Pydantic and indexed SQLite inserts. The worker
@@ -231,6 +231,78 @@ def test_artifact_integrity_errors_are_rejected(tmp_path, failure_code):
     with pytest.raises(InputRejected) as error:
         repository.ingest(accepted.job_id, [raw], manifest)
     assert error.value.code == failure_code
+
+
+def test_cancelled_artifact_records_are_separate_from_exp2_rows(tmp_path):
+    scopes = _scopes()
+    active = _ticket(scopes[0], "a", 1, 1)
+    cancelled = {
+        "recordType": "CANCELLED_TICKET",
+        "cancelledTicket": {
+            "accountHmac": _hash("f"), "ticketHmac": _hash("e"),
+            "eventId": scopes[0]["eventId"], "performanceId": scopes[0]["performanceId"],
+            "ledgerVersionId": scopes[0]["ledgerVersionId"],
+            "supplierNamespace": "supplier-a", "hmacPurpose": "TRACK1_CONNECTION",
+            "hmacKeyVersion": "key-v1", "sourceVersion": "cancel-source-v1",
+            "sourceRowOrdinal": 2, "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+            "cancelledAt": "2025-12-20T10:00:00Z",
+        },
+    }
+    raw = b"".join(json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in (active, cancelled))
+    payload = _manifest_payload(scopes, raw, 2)
+    payload["inputFormatVersion"] = "multi-event-exp2-ndjson-v2"
+    payload["cancelledTicketRecordCount"] = 1
+    manifest = MultiEventArtifactManifest.model_validate(payload)
+    repository = MultiEventArtifactJobRepository(tmp_path / "cancelled.sqlite")
+    accepted = repository.create("cancelled-separated", manifest)
+    assert repository.start(accepted.job_id)
+    repository.ingest(accepted.job_id, [raw], manifest)
+
+    db = sqlite3.connect(repository.path)
+    try:
+        assert db.execute("SELECT count(*) FROM mei_artifact_rows WHERE job_id=?", (accepted.job_id,)).fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM mei_artifact_cancelled_tickets WHERE job_id=?", (accepted.job_id,)).fetchone()[0] == 1
+        accounts = {row[0] for row in db.execute("SELECT account_id FROM mei_artifact_accounts WHERE job_id=?", (accepted.job_id,))}
+        stored_tokens = {row[0] for row in db.execute("SELECT token FROM mei_artifact_token_owners WHERE job_id=?", (accepted.job_id,))}
+    finally:
+        db.close()
+    assert accounts == {_hash("a")}
+    assert _hash("f") not in accounts
+    assert _hash("e") not in stored_tokens
+
+
+def test_cancelled_artifact_requires_v2_and_matching_count(tmp_path):
+    scopes = _scopes()
+    cancelled = {
+        "recordType": "CANCELLED_TICKET",
+        "cancelledTicket": {
+            "accountHmac": _hash("f"), "ticketHmac": _hash("e"),
+            "eventId": scopes[0]["eventId"], "performanceId": scopes[0]["performanceId"],
+            "ledgerVersionId": scopes[0]["ledgerVersionId"],
+            "supplierNamespace": "supplier-a", "hmacPurpose": "TRACK1_CONNECTION",
+            "hmacKeyVersion": "key-v1", "sourceVersion": "cancel-source-v1",
+            "sourceRowOrdinal": 2, "cancelledAt": "2025-12-20T10:00:00Z",
+        },
+    }
+    rows = [_ticket(scopes[0], "a", 1, 1), cancelled]
+    raw, v1_manifest = _artifact(scopes, rows)
+    v1_repository = MultiEventArtifactJobRepository(tmp_path / "cancelled-v1.sqlite")
+    v1_job = v1_repository.create("cancelled-v1", v1_manifest)
+    assert v1_repository.start(v1_job.job_id)
+    with pytest.raises(InputRejected) as error:
+        v1_repository.ingest(v1_job.job_id, [raw], v1_manifest)
+    assert error.value.code == "CANCELLED_TICKET_FORMAT_UNSUPPORTED"
+
+    payload = _manifest_payload(scopes, raw, 2)
+    payload["inputFormatVersion"] = "multi-event-exp2-ndjson-v2"
+    payload["cancelledTicketRecordCount"] = 0
+    mismatch_manifest = MultiEventArtifactManifest.model_validate(payload)
+    mismatch_repository = MultiEventArtifactJobRepository(tmp_path / "cancelled-count.sqlite")
+    mismatch_job = mismatch_repository.create("cancelled-count", mismatch_manifest)
+    assert mismatch_repository.start(mismatch_job.job_id)
+    with pytest.raises(InputRejected) as error:
+        mismatch_repository.ingest(mismatch_job.job_id, [raw], mismatch_manifest)
+    assert error.value.code == "CANCELLED_TICKET_RECORD_COUNT_MISMATCH"
 
 
 class _Store:

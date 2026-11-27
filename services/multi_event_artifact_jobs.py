@@ -33,6 +33,8 @@ from schemas.multi_event import (
     MultiEventRelationshipPage,
     MultiEventRelationshipSummary,
     MultiEventScoreBreakdown,
+    MultiEventArtifactCancelledTicketRecord,
+    MultiEventCancelledTicketInput,
     MultiEventTicketInput,
     RETIRED_SCORE_VERSIONS,
     STORED_CONTEXT,
@@ -164,6 +166,15 @@ class MultiEventArtifactJobRepository:
                   job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, row_ordinal INTEGER NOT NULL,
                   account_id TEXT NOT NULL, reservation_no TEXT NOT NULL,
                   PRIMARY KEY(job_id,scope_id,row_ordinal),
+                  FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS mei_artifact_cancelled_tickets (
+                  job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, row_ordinal INTEGER NOT NULL,
+                  account_hmac TEXT NOT NULL, ticket_hmac TEXT NOT NULL,
+                  supplier_namespace TEXT NOT NULL, hmac_key_version TEXT NOT NULL, source_version TEXT NOT NULL,
+                  seat_zone TEXT, seat_row TEXT, seat_number TEXT, cancelled_at TEXT NOT NULL,
+                  PRIMARY KEY(job_id,scope_id,row_ordinal),
+                  UNIQUE(job_id,scope_id,account_hmac,ticket_hmac),
                   FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS mei_artifact_accounts (
@@ -375,12 +386,12 @@ class MultiEventArtifactJobRepository:
 
     def clear_stage(self, job_id: str) -> None:
         with _connect(self.path) as db:
-            for table in ("mei_artifact_candidate_cocluster", "mei_artifact_cocluster_members", "mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_rows"):
+            for table in ("mei_artifact_candidate_cocluster", "mei_artifact_cocluster_members", "mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_cancelled_tickets", "mei_artifact_rows"):
                 db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
             db.execute("UPDATE mei_artifact_jobs SET input_record_count=0,processed_record_count=0,candidate_count=0,supplier_namespace=NULL,hmac_key_version=NULL WHERE job_id=?", (job_id,))
 
     def ingest(self, job_id: str, chunks: Iterable[bytes], manifest: MultiEventArtifactManifest) -> None:
-        digest, carry, row_no = hashlib.sha256(), b"", 0
+        digest, carry, row_no, cancelled_count = hashlib.sha256(), b"", 0, 0
         byte_count = 0
         scopes = {scope.key: index for index, scope in enumerate(manifest.ledger_scopes)}
         supplier_namespace = None
@@ -399,9 +410,10 @@ class MultiEventArtifactJobRepository:
                 for line in lines:
                     if len(line.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
                         raise InputRejected("INPUT_ROW_TOO_LARGE")
-                    row_no, supplier_namespace, key_version = self._ingest_line(
+                    row_no, supplier_namespace, key_version, cancelled = self._ingest_line(
                         db, job_id, line.rstrip(b"\r"), row_no, manifest, scopes, supplier_namespace, key_version,
                     )
+                    cancelled_count += int(cancelled)
                     if row_no % 500 == 0:
                         db.commit()
                 if len(carry) > MAX_NDJSON_LINE_BYTES:
@@ -409,13 +421,18 @@ class MultiEventArtifactJobRepository:
             if carry:
                 if len(carry.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
                     raise InputRejected("INPUT_ROW_TOO_LARGE")
-                row_no, supplier_namespace, key_version = self._ingest_line(
+                row_no, supplier_namespace, key_version, cancelled = self._ingest_line(
                     db, job_id, carry.rstrip(b"\r"), row_no, manifest, scopes, supplier_namespace, key_version,
                 )
+                cancelled_count += int(cancelled)
             if digest.hexdigest() != manifest.sha256:
                 raise InputRejected("SHA256_MISMATCH")
             if row_no != manifest.record_count:
                 raise InputRejected("RECORD_COUNT_MISMATCH")
+            if cancelled_count != manifest.cancelled_ticket_record_count:
+                raise InputRejected("CANCELLED_TICKET_RECORD_COUNT_MISMATCH")
+            if row_no - cancelled_count < 1:
+                raise InputRejected("ACTIVE_TICKET_RECORD_REQUIRED")
             if not supplier_namespace or not key_version:
                 raise InputRejected("IDENTITY_CONTRACT_UNAVAILABLE")
             self._finalize_ip_windows(db, job_id)
@@ -427,7 +444,47 @@ class MultiEventArtifactJobRepository:
         if not line:
             raise InputRejected("INPUT_ROW_MISSING")
         try:
-            ticket = MultiEventTicketInput.model_validate_json(line)
+            payload = json.loads(line)
+        except Exception as exc:
+            raise InputRejected("INPUT_ROW_INVALID") from exc
+        if isinstance(payload, dict) and payload.get("recordType") == "CANCELLED_TICKET":
+            if manifest.input_format_version != "multi-event-exp2-ndjson-v2":
+                raise InputRejected("CANCELLED_TICKET_FORMAT_UNSUPPORTED")
+            try:
+                record = MultiEventArtifactCancelledTicketRecord.model_validate(payload)
+            except Exception as exc:
+                raise InputRejected("INPUT_ROW_INVALID") from exc
+            cancelled: MultiEventCancelledTicketInput = record.cancelled_ticket
+            scope_id = scopes.get(cancelled.scope_key)
+            if scope_id is None:
+                raise InputRejected("CANCELLED_TICKET_SCOPE_MISMATCH")
+            if (cancelled.supplier_namespace != manifest.supplier_namespace
+                    or cancelled.hmac_purpose != manifest.hmac_purpose
+                    or cancelled.hmac_key_version != manifest.hmac_key_version):
+                raise InputRejected("IDENTITY_CONTRACT_MISMATCH")
+            row_no += 1
+            if row_no > manifest.record_count:
+                raise InputRejected("RECORD_COUNT_EXCEEDED")
+            try:
+                if db.execute("SELECT 1 FROM mei_artifact_rows WHERE job_id=? AND scope_id=? AND row_ordinal=?",
+                              (job_id, scope_id, cancelled.source_row_ordinal)).fetchone():
+                    raise InputRejected("DUPLICATE_SOURCE_ROW")
+                db.execute("""
+                    INSERT INTO mei_artifact_cancelled_tickets
+                      (job_id,scope_id,row_ordinal,account_hmac,ticket_hmac,supplier_namespace,
+                       hmac_key_version,source_version,seat_zone,seat_row,seat_number,cancelled_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (job_id, scope_id, cancelled.source_row_ordinal, cancelled.account_hmac,
+                          cancelled.ticket_hmac, cancelled.supplier_namespace, cancelled.hmac_key_version,
+                          cancelled.source_version, cancelled.seat_zone, cancelled.seat_row,
+                          cancelled.seat_number, cancelled.cancelled_at.isoformat()))
+            except sqlite3.IntegrityError as exc:
+                raise InputRejected("CANCELLED_TICKET_DUPLICATE") from exc
+            return row_no, supplier_namespace or cancelled.supplier_namespace, key_version or cancelled.hmac_key_version, True
+        if isinstance(payload, dict) and "recordType" in payload:
+            raise InputRejected("INPUT_ROW_INVALID")
+        try:
+            ticket = MultiEventTicketInput.model_validate(payload)
         except Exception as exc:
             raise InputRejected("INPUT_ROW_INVALID") from exc
         scope_id = scopes.get(ticket.scope_key)
@@ -435,6 +492,9 @@ class MultiEventArtifactJobRepository:
             raise InputRejected("INPUT_SCOPE_MISMATCH")
         if ticket.source_row_ordinal is None:
             raise InputRejected("SOURCE_ROW_ORDINAL_REQUIRED")
+        if db.execute("SELECT 1 FROM mei_artifact_cancelled_tickets WHERE job_id=? AND scope_id=? AND row_ordinal=?",
+                      (job_id, scope_id, ticket.source_row_ordinal)).fetchone():
+            raise InputRejected("DUPLICATE_SOURCE_ROW")
         if (ticket.supplier_namespace != manifest.supplier_namespace
                 or ticket.hmac_purpose != manifest.hmac_purpose
                 or ticket.hmac_key_version != manifest.hmac_key_version):
@@ -473,7 +533,7 @@ class MultiEventArtifactJobRepository:
                         ticket.quantity_source_version, ticket.source_version, ticket.quantity_status, ticket.quantity_reason))
         except sqlite3.IntegrityError as exc:
             raise InputRejected("INPUT_ROW_DUPLICATE") from exc
-        return row_no, supplier_namespace, key_version
+        return row_no, supplier_namespace, key_version, False
 
     @staticmethod
     def _finalize_ip_windows(db, job_id: str) -> None:

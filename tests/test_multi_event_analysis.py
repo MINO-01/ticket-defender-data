@@ -87,6 +87,54 @@ def test_multi_event_candidate_uses_verified_strong_signal_without_exposing_toke
     assert _token("e") not in candidate.model_dump_json()
 
 
+def test_cancelled_tickets_are_optional_separate_evidence_and_do_not_change_exp2_result():
+    payload = _payload()
+    first, second = payload["ledgerScopes"]
+    payload["tickets"] = [
+        _ticket(first, "a", "1", phoneHash=_token("e")),
+        _ticket(first, "b", "2", phoneHash=_token("e")),
+        _ticket(second, "a", "3", phoneHash=_token("e")),
+        _ticket(second, "b", "4", phoneHash=_token("e")),
+    ]
+    without_cancelled = _analyze(payload)
+    payload["cancelledTickets"] = [{
+        "accountHmac": _token("a"), "ticketHmac": _token("b"),
+        "eventId": first["eventId"], "performanceId": first["performanceId"],
+        "ledgerVersionId": first["ledgerVersionId"], "supplierNamespace": "supplier-a",
+        "hmacPurpose": "TRACK1_CONNECTION", "hmacKeyVersion": "v1",
+        "sourceVersion": "cancel-source-v1", "sourceRowOrdinal": 99,
+        "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+        "cancelledAt": "2025-12-20T10:00:00Z",
+    }]
+    with_cancelled = _analyze(payload)
+    assert with_cancelled.model_dump(mode="json", by_alias=True) == without_cancelled.model_dump(mode="json", by_alias=True)
+
+
+def test_cancelled_ticket_scope_duplicate_and_extra_fields_are_rejected():
+    payload = _payload()
+    first, _second = payload["ledgerScopes"]
+    payload["tickets"] = [_ticket(first, "a", "1", phoneHash=_token("e"))]
+    cancelled = {
+        "accountHmac": _token("a"), "ticketHmac": _token("b"),
+        "eventId": first["eventId"], "performanceId": first["performanceId"],
+        "ledgerVersionId": first["ledgerVersionId"], "supplierNamespace": "supplier-a",
+        "hmacPurpose": "TRACK1_CONNECTION", "hmacKeyVersion": "v1",
+        "sourceVersion": "cancel-source-v1", "sourceRowOrdinal": 99,
+        "cancelledAt": "2025-12-20T10:00:00Z",
+    }
+    payload["cancelledTickets"] = [cancelled, cancelled]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+    payload["cancelledTickets"] = [{**cancelled, "eventId": "unlisted-event"}]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+    payload["cancelledTickets"] = [{**cancelled, "rawTicketNumber": "must-not-be-accepted"}]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+
 def test_payment_or_ip_only_without_repeated_cocluster_never_links_candidate():
     """같은 계정이 결제와 IP 시간창만 공유해도 두 회차에서 같은 군집이 아니면 후보가 아닙니다."""
     payload = _payload()

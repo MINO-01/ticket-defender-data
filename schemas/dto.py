@@ -277,12 +277,51 @@ class Track1LimitTicketInput(BaseModel):
         return self.performance_id.lower()
 
 
+class Track1CancelledTicketInput(BaseModel):
+    """Separate, pseudonymous cancellation evidence; never an active quantity row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_hmac: HashToken = Field(alias="accountHmac")
+    ticket_hmac: HashToken = Field(alias="ticketHmac")
+    event_id: TicketIdentifier = Field(alias="eventId")
+    performance_id: UUIDText = Field(alias="performanceId")
+    seat_zone: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None, alias="seatZone")
+    seat_row: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None, alias="seatRow")
+    seat_number: Optional[Annotated[str, StringConstraints(min_length=1, max_length=64)]] = Field(default=None, alias="seatNumber")
+    cancelled_at: AwareDatetime = Field(alias="cancelledAt")
+
+    @model_validator(mode="after")
+    def validate_identifiers(self):
+        if not self.event_id.strip():
+            raise PydanticCustomError("invalid_identifier", "Ticket identifiers must not be blank")
+        return self
+
+    @property
+    def scope_key(self) -> tuple[str, str]:
+        return self.event_id, self.performance_id.lower()
+
+    @property
+    def row_key(self) -> tuple[str, str, str]:
+        return self.account_hmac, self.ticket_hmac, self.performance_id.lower()
+
+
+class Track1BulkCancelledTicketRecord(BaseModel):
+    """Version 2 NDJSON envelope for a cancellation row, separate from ticket rows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    record_type: Literal["CANCELLED_TICKET"] = Field(alias="recordType")
+    cancelled_ticket: Track1CancelledTicketInput = Field(alias="cancelledTicket")
+
+
 class Track1LimitAnalysisRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: UUIDText = Field(alias="requestId")
     performance_scopes: List[Track1PerformanceScope] = Field(min_length=1, alias="performanceScopes")
     tickets: List[Track1LimitTicketInput] = Field(min_length=1)
+    cancelled_tickets: List[Track1CancelledTicketInput] = Field(default_factory=list, max_length=50_000, alias="cancelledTickets")
 
     @model_validator(mode="after")
     def validate_scopes(self):
@@ -295,6 +334,20 @@ class Track1LimitAnalysisRequest(BaseModel):
         for ticket in self.tickets:
             if scope_events.get(ticket.analysis_scope) != ticket.event_id:
                 raise PydanticCustomError("TICKET_SCOPE_MISMATCH", "ticket must match one performance scope")
+        cancelled_keys = [ticket.row_key for ticket in self.cancelled_tickets]
+        if len(cancelled_keys) != len(set(cancelled_keys)):
+            raise PydanticCustomError("duplicate_cancelled_ticket", "Duplicate cancelled ticket evidence is not allowed")
+        if self.cancelled_tickets and any(ticket.ticket_status not in (None, "ACTIVE") for ticket in self.tickets):
+            raise PydanticCustomError("CANCELLED_TICKET_MUST_BE_SEPARATE", "cancelled ticket evidence must not be mixed into tickets")
+        active_ticket_refs = {
+            (ticket.analysis_scope, ticket.ticket_reference)
+            for ticket in self.tickets if ticket.ticket_reference is not None
+        }
+        for ticket in self.cancelled_tickets:
+            if scope_events.get(ticket.performance_id.lower()) != ticket.event_id:
+                raise PydanticCustomError("CANCELLED_TICKET_SCOPE_MISMATCH", "cancelled ticket must match one performance scope")
+            if (ticket.performance_id.lower(), ticket.ticket_hmac) in active_ticket_refs:
+                raise PydanticCustomError("ACTIVE_CANCELLED_TICKET_OVERLAP", "cancelled ticket must be separate from active tickets")
         keys = [ticket.row_identity for ticket in self.tickets]
         if len(keys) != len(set(keys)):
             raise PydanticCustomError("duplicate_ticket", "Duplicate ticket identifiers are not allowed")
@@ -347,7 +400,10 @@ class Track1BulkArtifactManifest(BaseModel):
     object_version: BulkId = Field(alias="objectVersion")
     sha256: Sha256Hex
     record_count: Annotated[StrictInt, Field(ge=1, le=10_000_000)] = Field(alias="recordCount")
-    input_format_version: Literal["track1-limit-ndjson-v1"] = Field(alias="inputFormatVersion")
+    input_format_version: Literal["track1-limit-ndjson-v1", "track1-limit-ndjson-v2"] = Field(alias="inputFormatVersion")
+    cancelled_ticket_record_count: Annotated[StrictInt, Field(ge=0, le=10_000_000)] = Field(
+        default=0, alias="cancelledTicketRecordCount"
+    )
     tenant_id: TicketIdentifier = Field(alias="tenantId")
     event_id: TicketIdentifier = Field(alias="eventId")
     ledger_version: TicketIdentifier = Field(alias="ledgerVersion")
@@ -376,6 +432,10 @@ class Track1BulkArtifactManifest(BaseModel):
                 "MANIFEST_SOURCE_MISMATCH",
                 "performance scope source metadata must match manifest",
             )
+        if self.cancelled_ticket_record_count >= self.record_count:
+            raise PydanticCustomError("INVALID_CANCELLED_TICKET_COUNT", "artifact must contain at least one active ticket row")
+        if self.input_format_version == "track1-limit-ndjson-v1" and self.cancelled_ticket_record_count != 0:
+            raise PydanticCustomError("INVALID_CANCELLED_TICKET_FORMAT", "cancelled ticket rows require NDJSON v2")
         return self
 
 

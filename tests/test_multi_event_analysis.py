@@ -110,6 +110,41 @@ def test_cancelled_tickets_are_optional_separate_evidence_and_do_not_change_exp2
     assert with_cancelled.model_dump(mode="json", by_alias=True) == without_cancelled.model_dump(mode="json", by_alias=True)
 
 
+def test_active_ticket_v3_metadata_is_optional_and_does_not_change_exp2_result():
+    payload = _payload()
+    first, second = payload["ledgerScopes"]
+    tickets = [
+        _ticket(first, "a", "1", phoneHash=_token("e")),
+        _ticket(first, "b", "2", phoneHash=_token("e")),
+        _ticket(second, "a", "3", phoneHash=_token("e")),
+        _ticket(second, "b", "4", phoneHash=_token("e")),
+    ]
+    payload["tickets"] = tickets
+    baseline = _analyze(payload)
+
+    for ticket in tickets:
+        ticket.update({
+            "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+            "reservedAt": "2025-12-20T09:00:00Z", "paidAt": "2025-12-20T09:05:00Z",
+            "accountCreatedAt": "2024-01-03T00:00:00Z",
+        })
+    enriched = _analyze(payload)
+
+    assert enriched.model_dump(mode="json", by_alias=True) == baseline.model_dump(mode="json", by_alias=True)
+
+
+def test_active_ticket_v3_metadata_keeps_bounds_and_aware_datetime_validation():
+    payload = _payload()
+    first, _second = payload["ledgerScopes"]
+    payload["tickets"] = [_ticket(first, "a", "1", phoneHash=_token("e"), seatZone="x" * 65)]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+    payload["tickets"] = [_ticket(first, "a", "1", phoneHash=_token("e"), reservedAt="2025-12-20T09:00:00")]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+
 def test_cancelled_ticket_scope_duplicate_and_extra_fields_are_rejected():
     payload = _payload()
     first, _second = payload["ledgerScopes"]

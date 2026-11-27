@@ -235,7 +235,9 @@ def test_artifact_integrity_errors_are_rejected(tmp_path, failure_code):
 
 def test_cancelled_artifact_records_are_separate_from_exp2_rows(tmp_path):
     scopes = _scopes()
-    active = _ticket(scopes[0], "a", 1, 1)
+    active = _ticket(scopes[0], "a", 1, 1, seatZone="BALCONY", seatRow="R1", seatNumber="12",
+                     reservedAt="2025-12-20T09:00:00Z", paidAt="2025-12-20T09:05:00Z",
+                     accountCreatedAt="2024-01-03T00:00:00Z")
     cancelled = {
         "recordType": "CANCELLED_TICKET",
         "cancelledTicket": {
@@ -261,6 +263,10 @@ def test_cancelled_artifact_records_are_separate_from_exp2_rows(tmp_path):
     db = sqlite3.connect(repository.path)
     try:
         assert db.execute("SELECT count(*) FROM mei_artifact_rows WHERE job_id=?", (accepted.job_id,)).fetchone()[0] == 1
+        active_metadata = db.execute("""
+            SELECT seat_zone,seat_row,seat_number,reserved_at,paid_at,account_created_at
+            FROM mei_artifact_rows WHERE job_id=?
+            """, (accepted.job_id,)).fetchone()
         assert db.execute("SELECT count(*) FROM mei_artifact_cancelled_tickets WHERE job_id=?", (accepted.job_id,)).fetchone()[0] == 1
         accounts = {row[0] for row in db.execute("SELECT account_id FROM mei_artifact_accounts WHERE job_id=?", (accepted.job_id,))}
         stored_tokens = {row[0] for row in db.execute("SELECT token FROM mei_artifact_token_owners WHERE job_id=?", (accepted.job_id,))}
@@ -269,6 +275,31 @@ def test_cancelled_artifact_records_are_separate_from_exp2_rows(tmp_path):
     assert accounts == {_hash("a")}
     assert _hash("f") not in accounts
     assert _hash("e") not in stored_tokens
+    assert tuple(active_metadata) == (
+        "BALCONY", "R1", "12", "2025-12-20T09:00:00+00:00", "2025-12-20T09:05:00+00:00",
+        "2024-01-03T00:00:00+00:00",
+    )
+
+
+def test_artifact_rows_add_v3_metadata_columns_without_losing_legacy_rows(tmp_path):
+    path = tmp_path / "legacy-artifact.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("""
+            CREATE TABLE mei_artifact_rows (
+              job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, row_ordinal INTEGER NOT NULL,
+              account_id TEXT NOT NULL, reservation_no TEXT NOT NULL,
+              PRIMARY KEY(job_id,scope_id,row_ordinal)
+            )
+            """)
+        db.execute("INSERT INTO mei_artifact_rows VALUES(?,?,?,?,?)", ("old-job", 0, 1, _hash("a"), _hash("b")))
+
+    MultiEventArtifactJobRepository(path)
+
+    with sqlite3.connect(path) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(mei_artifact_rows)")}
+        old_row = db.execute("SELECT account_id,reservation_no FROM mei_artifact_rows WHERE job_id='old-job'").fetchone()
+    assert {"seat_zone", "seat_row", "seat_number", "reserved_at", "paid_at", "account_created_at"} <= columns
+    assert old_row == (_hash("a"), _hash("b"))
 
 
 def test_cancelled_artifact_requires_v2_and_matching_count(tmp_path):

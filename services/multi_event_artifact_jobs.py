@@ -165,6 +165,8 @@ class MultiEventArtifactJobRepository:
                 CREATE TABLE IF NOT EXISTS mei_artifact_rows (
                   job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, row_ordinal INTEGER NOT NULL,
                   account_id TEXT NOT NULL, reservation_no TEXT NOT NULL,
+                  seat_zone TEXT, seat_row TEXT, seat_number TEXT,
+                  reserved_at TEXT, paid_at TEXT, account_created_at TEXT,
                   PRIMARY KEY(job_id,scope_id,row_ordinal),
                   FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
                 );
@@ -290,6 +292,10 @@ class MultiEventArtifactJobRepository:
                   FOREIGN KEY(job_id,candidate_id) REFERENCES mei_artifact_candidates(job_id,candidate_id) ON DELETE CASCADE
                 );
             """)
+            existing_columns = {row["name"] for row in db.execute("PRAGMA table_info(mei_artifact_rows)")}
+            for column in ("seat_zone", "seat_row", "seat_number", "reserved_at", "paid_at", "account_created_at"):
+                if column not in existing_columns:
+                    db.execute(f"ALTER TABLE mei_artifact_rows ADD COLUMN {column} TEXT")
 
     def recover_interrupted(self) -> None:
         with _connect(self.path) as db:
@@ -512,8 +518,16 @@ class MultiEventArtifactJobRepository:
         if row_no > manifest.record_count:
             raise InputRejected("RECORD_COUNT_EXCEEDED")
         try:
-            db.execute("INSERT INTO mei_artifact_rows(job_id,scope_id,row_ordinal,account_id,reservation_no) VALUES(?,?,?,?,?)",
-                       (job_id, scope_id, ticket.source_row_ordinal, ticket.account_id, ticket.reservation_no))
+            db.execute("""
+                INSERT INTO mei_artifact_rows(
+                  job_id,scope_id,row_ordinal,account_id,reservation_no,
+                  seat_zone,seat_row,seat_number,reserved_at,paid_at,account_created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """, (job_id, scope_id, ticket.source_row_ordinal, ticket.account_id, ticket.reservation_no,
+                      ticket.seat_zone, ticket.seat_row, ticket.seat_number,
+                      ticket.reserved_at.isoformat() if ticket.reserved_at is not None else None,
+                      ticket.paid_at.isoformat() if ticket.paid_at is not None else None,
+                      ticket.account_created_at.isoformat() if ticket.account_created_at is not None else None))
             db.execute("INSERT OR IGNORE INTO mei_artifact_accounts(job_id,scope_id,account_id) VALUES(?,?,?)",
                        (job_id, scope_id, ticket.account_id))
             for signal in BASE_SIGNALS:

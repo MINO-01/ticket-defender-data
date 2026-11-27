@@ -34,6 +34,11 @@ def build_evidence_reasons(
     qualifying group for the reason. A member's ``peerCount`` is the largest
     number of other members in one qualifying token group for that reason.
     Strength rank orders by count, then performance coverage, then code.
+
+    HIGH_QUANTITY remains in the response schema's reason vocabulary but is
+    intentionally not emitted here: this candidate artifact does not yet join
+    per-account supplier-seat quantities to verified Track 2 resale-seat
+    overlap. The score's quantity component alone is not sufficient evidence.
     """
     members = sorted(set(account_ids))
     metrics: dict[str, dict] = {}
@@ -54,15 +59,24 @@ def build_evidence_reasons(
             item["performances"].add(performance_id)
 
     repeated = set(candidate_performances)
+    repeated_members: dict[str, set[str]] = {}
     if len(repeated) >= 2:
-        metrics["REPEATED_PERFORMANCES"] = {"accounts": set(members), "performances": repeated}
         for account in members:
-            performances = observed_performances[account] | (member_performances or {}).get(account, set())
+            performances = (
+                observed_performances[account]
+                | (member_performances or {}).get(account, set())
+            ) & repeated
             if len(performances) >= 2:
+                repeated_members[account] = performances
                 member_metrics[account]["REPEATED_PERFORMANCES"] = {
                     "peer_count": 0,
-                    "performances": set(performances),
+                    "performances": performances,
                 }
+    if repeated_members:
+        metrics["REPEATED_PERFORMANCES"] = {
+            "accounts": set(repeated_members),
+            "performances": set().union(*repeated_members.values()),
+        }
 
     ordered = sorted(metrics.items(), key=lambda item: (
         -len(item[1]["accounts"]), -len(item[1]["performances"]), item[0],

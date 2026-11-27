@@ -58,6 +58,13 @@ def test_evidence_counts_distinct_members_and_member_peers_without_returning_tok
         "code": "SHARED_REFUND_ACCOUNT",
         "count": 3,
         "performances": ["performance-1", "performance-2"],
+        "strengthRank": 1,
+    }
+    repeated = next(item for item in reason_rows if item["code"] == "REPEATED_PERFORMANCES")
+    assert repeated == {
+        "code": "REPEATED_PERFORMANCES",
+        "count": 2,
+        "performances": ["performance-1", "performance-2"],
         "strengthRank": 2,
     }
     assert len(member_rows) == 3
@@ -68,12 +75,17 @@ def test_evidence_counts_distinct_members_and_member_peers_without_returning_tok
 
 
 def test_member_recurrence_uses_only_that_members_observed_candidate_performances():
-    _candidate_reasons, member_rows = build_evidence_reasons(
+    candidate_reasons, member_rows = build_evidence_reasons(
         {"account-a", "account-b"},
         {"performance-1", "performance-2"},
         [],
         {"account-a": {"performance-1", "performance-2"}, "account-b": {"performance-2"}},
     )
+
+    assert candidate_reasons == [{
+        "code": "REPEATED_PERFORMANCES", "count": 1,
+        "performances": ["performance-1", "performance-2"], "strengthRank": 1,
+    }]
 
     account_a = next(item for item in member_rows if item["accountReferenceHmac"] == "account-a")
     account_b = next(item for item in member_rows if item["accountReferenceHmac"] == "account-b")
@@ -82,3 +94,15 @@ def test_member_recurrence_uses_only_that_members_observed_candidate_performance
         "performances": ["performance-1", "performance-2"],
     }]
     assert account_b["reasons"] == []
+
+
+def test_candidate_repeat_reason_is_omitted_when_no_member_repeats():
+    candidate_reasons, member_rows = build_evidence_reasons(
+        {"account-a", "account-b"},
+        {"performance-1", "performance-2"},
+        [],
+        {"account-a": {"performance-1"}, "account-b": {"performance-2"}},
+    )
+
+    assert candidate_reasons == []
+    assert all(item["reasons"] == [] for item in member_rows)

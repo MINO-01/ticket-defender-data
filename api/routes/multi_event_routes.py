@@ -12,6 +12,7 @@ from schemas.multi_event import (
     MultiEventArtifactJobCreateRequest,
     MultiEventArtifactJobStatus,
     MultiEventCandidatePage,
+    MultiEventMemberEvidencePage,
     MultiEventMemberPage,
     MultiEventRelationshipPage,
     UUIDText,
@@ -69,6 +70,17 @@ async def get_multi_event_artifact_candidate_members(
     service=Depends(get_multi_event_artifact_job_service),
 ):
     return service.repository.member_page(job_id, candidate_id, cursor, limit)
+
+
+@router.get("/jobs/{job_id}/results/{candidate_id}/member-reasons", response_model=MultiEventMemberEvidencePage)
+async def get_multi_event_artifact_candidate_member_reasons(
+    job_id: UUIDText,
+    candidate_id: str,
+    cursor: str | None = Query(default=None, pattern=r"^\d+$", max_length=10),
+    limit: int = Query(default=100, ge=1, le=500),
+    service=Depends(get_multi_event_artifact_job_service),
+):
+    return service.repository.member_reason_page(job_id, candidate_id, cursor, limit)
 
 
 @router.get("/jobs/{job_id}/results/{candidate_id}/relationships", response_model=MultiEventRelationshipPage)

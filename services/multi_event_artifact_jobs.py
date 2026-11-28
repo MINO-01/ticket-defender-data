@@ -29,6 +29,8 @@ from schemas.multi_event import (
     MultiEventCandidatePage,
     MultiEventCandidateSummary,
     MultiEventLedgerScope,
+    MultiEventMemberEvidence,
+    MultiEventMemberEvidencePage,
     MultiEventMemberPage,
     MultiEventRelationshipPage,
     MultiEventRelationshipSummary,
@@ -48,6 +50,7 @@ from services.multi_event_candidates import (
     require_comparison_budget,
     token_damping,
 )
+from services.multi_event_candidate_families import build_evidence_reasons, reason_code
 from services.track1_bulk_jobs import (
     GdsResourceExhausted,
     InputRejected,
@@ -73,6 +76,7 @@ MAX_RECURRENCE_COMPARISONS = 2_000_000
 MAX_CANDIDATE_EVIDENCE_GROUPS = 50_000
 MAX_CANDIDATE_EVIDENCE_ROWS = 5_000_000
 MAX_RELATIONSHIP_MEMBER_ROWS = 5_000_000
+MAX_CANDIDATE_REASON_GROUPS = 50_000
 MAX_QUANTITY_REASONS = 8
 MAX_ATTEMPTS = 3
 MAX_PENDING_JOBS = 100
@@ -246,6 +250,15 @@ class MultiEventArtifactJobRepository:
                   PRIMARY KEY(job_id,candidate_id,account_id),
                   FOREIGN KEY(job_id,candidate_id) REFERENCES mei_artifact_candidates(job_id,candidate_id) ON DELETE CASCADE
                 );
+                CREATE INDEX IF NOT EXISTS idx_mei_candidate_member_account
+                  ON mei_artifact_candidate_members(job_id,account_id,candidate_id);
+                CREATE TABLE IF NOT EXISTS mei_artifact_candidate_member_reasons (
+                  job_id TEXT NOT NULL, candidate_id TEXT NOT NULL, account_id TEXT NOT NULL,
+                  reasons_json TEXT NOT NULL,
+                  PRIMARY KEY(job_id,candidate_id,account_id),
+                  FOREIGN KEY(job_id,candidate_id,account_id)
+                    REFERENCES mei_artifact_candidate_members(job_id,candidate_id,account_id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS mei_artifact_candidate_evidence (
                   job_id TEXT NOT NULL, candidate_id TEXT NOT NULL, group_id TEXT NOT NULL,
                   PRIMARY KEY(job_id,candidate_id,group_id),
@@ -375,7 +388,7 @@ class MultiEventArtifactJobRepository:
 
     def clear_stage(self, job_id: str) -> None:
         with _connect(self.path) as db:
-            for table in ("mei_artifact_candidate_cocluster", "mei_artifact_cocluster_members", "mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_rows"):
+            for table in ("mei_artifact_candidate_cocluster", "mei_artifact_cocluster_members", "mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_member_reasons", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_rows"):
                 db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
             db.execute("UPDATE mei_artifact_jobs SET input_record_count=0,processed_record_count=0,candidate_count=0,supplier_namespace=NULL,hmac_key_version=NULL WHERE job_id=?", (job_id,))
 
@@ -655,6 +668,7 @@ class MultiEventArtifactJobRepository:
             stored = db.execute("SELECT count(*) FROM mei_artifact_candidates WHERE job_id=?", (job_id,)).fetchone()[0]
             if stored != kept_candidates:
                 raise RuntimeError("MULTI_EVENT_CANDIDATE_RESULT_COUNT_MISMATCH")
+            self._assign_candidate_families(db, job_id)
             changed = db.execute("UPDATE mei_artifact_jobs SET candidate_count=?,algorithm_version=?,updated_at=? WHERE job_id=? AND status='RUNNING'",
                                  (stored, algorithm_version, _now(), job_id)).rowcount
             if changed != 1:
@@ -919,6 +933,150 @@ class MultiEventArtifactJobRepository:
                 db.commit()
 
     @staticmethod
+    def _assign_candidate_families(db, job_id: str) -> None:
+        rows = db.execute(
+            "SELECT candidate_id,distinct_account_count,score,summary_json FROM mei_artifact_candidates WHERE job_id=? ORDER BY candidate_id",
+            (job_id,),
+        ).fetchall()
+        parents: dict[str, str | None] = {}
+        for row in rows:
+            candidate_id, size = row["candidate_id"], row["distinct_account_count"]
+            parent = db.execute("""
+                SELECT sup.candidate_id
+                FROM mei_artifact_candidate_members child
+                JOIN mei_artifact_candidate_members sup_member
+                  ON sup_member.job_id=child.job_id AND sup_member.account_id=child.account_id
+                JOIN mei_artifact_candidates sup
+                  ON sup.job_id=sup_member.job_id AND sup.candidate_id=sup_member.candidate_id
+                WHERE child.job_id=? AND child.candidate_id=? AND sup.candidate_id<>?
+                  AND sup.distinct_account_count>?
+                GROUP BY sup.candidate_id,sup.distinct_account_count
+                HAVING count(*)=?
+                ORDER BY sup.distinct_account_count,sup.candidate_id
+                LIMIT 1
+            """, (job_id, candidate_id, candidate_id, size, size)).fetchone()
+            parents[candidate_id] = parent["candidate_id"] if parent else None
+
+        children = {candidate_id: 0 for candidate_id in parents}
+        for parent in parents.values():
+            if parent is not None:
+                children[parent] += 1
+
+        roots: dict[str, str] = {}
+        for candidate_id in parents:
+            path = []
+            root = candidate_id
+            while parents[root] is not None and root not in roots:
+                path.append(root)
+                root = parents[root]
+            resolved_root = roots.get(root, root)
+            roots[candidate_id] = resolved_root
+            for item in path:
+                roots[item] = resolved_root
+        family_scores: dict[str, float] = {}
+        for row in rows:
+            family_id = roots[row["candidate_id"]]
+            family_scores[family_id] = max(family_scores.get(family_id, 0.0), row["score"])
+
+        for row in rows:
+            candidate_id = row["candidate_id"]
+            summary = json.loads(row["summary_json"])
+            summary.update({
+                "familyId": roots[candidate_id],
+                "parentCandidateId": parents[candidate_id],
+                "childCount": children[candidate_id],
+                "familyScore": family_scores[roots[candidate_id]],
+            })
+            db.execute(
+                "UPDATE mei_artifact_candidates SET summary_json=? WHERE job_id=? AND candidate_id=?",
+                (json.dumps(summary, sort_keys=True, separators=(",", ":")), job_id, candidate_id),
+            )
+
+    @staticmethod
+    def _candidate_reason_groups(db, job_id, candidate_id, scope_ids, scope_counts, scope_by_id):
+        groups = []
+        group_count = 0
+        owner_rows = 0
+        current_key = None
+        owners = set()
+        current = None
+
+        def flush():
+            nonlocal group_count
+            if current is None or len(owners) < 2:
+                return
+            signal = current["signal"]
+            if token_damping(signal, current["owner_count"], scope_counts.get(current["scope_id"], 0)) is None:
+                return
+            if reason_code(signal) is None:
+                return
+            group_count += 1
+            if group_count > MAX_CANDIDATE_REASON_GROUPS:
+                raise MultiEventResourceLimit("CANDIDATE_REASON_LIMIT_EXCEEDED")
+            groups.append((signal, current["performance_id"], set(owners)))
+
+        cursor = db.execute("""
+            WITH candidate_tokens AS (
+              SELECT o.scope_id,o.signal,o.token,o.account_id,
+                     count(*) OVER (PARTITION BY o.scope_id,o.signal,o.token) candidate_owner_count
+              FROM mei_artifact_candidate_members cm
+              JOIN mei_artifact_candidate_scopes cs
+                ON cs.job_id=cm.job_id AND cs.candidate_id=cm.candidate_id
+              JOIN mei_artifact_token_owners o
+                ON o.job_id=cm.job_id AND o.account_id=cm.account_id AND o.scope_id=cs.scope_id
+              WHERE cm.job_id=? AND cm.candidate_id=?
+                AND (o.signal IN ('refund_account_hash','phone_hash','device_id_hash','address_hash')
+                     OR o.signal LIKE 'ip_window:%')
+            ), global_counts AS (
+              SELECT scope_id,signal,token,count(*) owner_count
+              FROM mei_artifact_token_owners
+              WHERE job_id=?
+                AND (signal IN ('refund_account_hash','phone_hash','device_id_hash','address_hash')
+                     OR signal LIKE 'ip_window:%')
+              GROUP BY scope_id,signal,token
+            )
+            SELECT c.scope_id,c.signal,c.token,c.account_id,c.candidate_owner_count,
+                   g.owner_count,s.performance_id
+            FROM candidate_tokens c
+            JOIN global_counts g ON g.scope_id=c.scope_id AND g.signal=c.signal AND g.token=c.token
+            JOIN mei_artifact_scopes s ON s.job_id=? AND s.scope_id=c.scope_id
+            WHERE c.candidate_owner_count>=2
+            ORDER BY c.scope_id,c.signal,c.token,c.account_id
+        """, (job_id, candidate_id, job_id, job_id))
+        for row in cursor:
+            key = (row["scope_id"], row["signal"], row["token"])
+            if current_key is not None and key != current_key:
+                flush()
+                owners.clear()
+            current_key = key
+            current = row
+            owners.add(row["account_id"])
+            owner_rows += 1
+            if owner_rows > MAX_CANDIDATE_EVIDENCE_ROWS:
+                raise MultiEventResourceLimit("CANDIDATE_REASON_ROW_LIMIT_EXCEEDED")
+        flush()
+        return groups
+
+    @staticmethod
+    def _candidate_member_performances(db, job_id: str, candidate_id: str) -> dict[str, set[str]]:
+        rows = db.execute("""
+            SELECT DISTINCT cm.account_id,s.performance_id
+            FROM mei_artifact_candidate_cocluster cc
+            JOIN mei_artifact_cocluster_members cm
+              ON cm.job_id=cc.job_id AND (cm.left_scope_id=cc.scope_id OR cm.right_scope_id=cc.scope_id)
+            JOIN mei_artifact_candidate_members candidate_member
+              ON candidate_member.job_id=cc.job_id AND candidate_member.candidate_id=cc.candidate_id
+                AND candidate_member.account_id=cm.account_id
+            JOIN mei_artifact_scopes s ON s.job_id=cc.job_id AND s.scope_id=cc.scope_id
+            WHERE cc.job_id=? AND cc.candidate_id=?
+            ORDER BY cm.account_id,s.performance_id
+        """, (job_id, candidate_id)).fetchall()
+        result: dict[str, set[str]] = {}
+        for row in rows:
+            result.setdefault(row["account_id"], set()).add(row["performance_id"])
+        return result
+
+    @staticmethod
     def _finalize_candidate(db, job_id, candidate_id, manifest, scope_by_id) -> int:
         member_count = db.execute("SELECT count(*) FROM mei_artifact_candidate_members WHERE job_id=? AND candidate_id=?", (job_id, candidate_id)).fetchone()[0]
         if member_count < 2 or member_count > MAX_CANDIDATE_MEMBERS:
@@ -1029,6 +1187,26 @@ class MultiEventArtifactJobRepository:
             return 0
         score = evaluation.score
 
+        reason_groups = MultiEventArtifactJobRepository._candidate_reason_groups(
+            db, job_id, candidate_id, scope_ids, scope_counts, scope_by_id,
+        )
+        candidate_reasons, member_reasons = build_evidence_reasons(
+            (row["account_id"] for row in db.execute(
+                "SELECT account_id FROM mei_artifact_candidate_members WHERE job_id=? AND candidate_id=?",
+                (job_id, candidate_id),
+            )),
+            (scope_by_id[index].performance_id for index in scope_ids),
+            reason_groups,
+            MultiEventArtifactJobRepository._candidate_member_performances(db, job_id, candidate_id),
+        )
+        db.executemany(
+            "INSERT OR REPLACE INTO mei_artifact_candidate_member_reasons(job_id,candidate_id,account_id,reasons_json) VALUES(?,?,?,?)",
+            [(job_id, candidate_id, item["accountReferenceHmac"], json.dumps(item["reasons"], sort_keys=True, separators=(",", ":")))
+             for item in member_reasons],
+        )
+        if len(member_reasons) != member_count:
+            raise RuntimeError("MULTI_EVENT_MEMBER_REASON_COUNT_MISMATCH")
+
         for relation_type, relation_scope_ids in sorted(scopes_by_type.items()):
             relation_scopes = sorted((_public_scope(scope_by_id[index]) for index in relation_scope_ids), key=lambda item: item.key)
             rel_id = "rel-" + hashlib.sha256(f"MEI_REL|{candidate_id}|{relation_type}".encode("utf-8")).hexdigest()
@@ -1050,6 +1228,7 @@ class MultiEventArtifactJobRepository:
             excludedSignals=list(evaluation.excluded_signals),
             unavailableSignals=list(evaluation.unavailable_signals),
             normalSharingPossibilities=list(evaluation.normal_sharing_possibilities),
+            reasons=candidate_reasons,
             scoreBreakdown=MultiEventScoreBreakdown(
                 L=score.link, G=score.size, B=score.behavior, Q=score.quantity,
                 R=score.recurrence, score=score.score,
@@ -1122,6 +1301,36 @@ class MultiEventArtifactJobRepository:
         records = [row["account_id"] for row in rows]
         next_cursor = str(offset + len(records)) if offset + len(records) < total else None
         return MultiEventMemberPage(
+            jobId=job_id, candidateId=candidate_id, ledgerVersionSetDigest=manifest.ledger_version_set_digest,
+            cursor=cursor, nextCursor=next_cursor, totalCount=total, records=records,
+        )
+
+    def member_reason_page(self, job_id: str, candidate_id: str, cursor: str | None, limit: int) -> MultiEventMemberEvidencePage:
+        offset, limit = self._cursor_values(cursor, limit)
+        if not candidate_id or not candidate_id.startswith("multi-"):
+            raise HTTPException(404, detail={"code": "CANDIDATE_NOT_FOUND"})
+        with _connect(self.path) as db:
+            manifest = self._completed_job_manifest(db, job_id)
+            count = db.execute(
+                "SELECT distinct_account_count FROM mei_artifact_candidates WHERE job_id=? AND candidate_id=?",
+                (job_id, candidate_id),
+            ).fetchone()
+            if count is None:
+                raise HTTPException(404, detail={"code": "CANDIDATE_NOT_FOUND"})
+            total = count["distinct_account_count"]
+            if offset > total:
+                raise HTTPException(422, detail={"code": "INVALID_CURSOR"})
+            rows = db.execute("""
+                SELECT m.account_id,COALESCE(r.reasons_json,'[]') reasons_json
+                FROM mei_artifact_candidate_members m
+                LEFT JOIN mei_artifact_candidate_member_reasons r
+                  ON r.job_id=m.job_id AND r.candidate_id=m.candidate_id AND r.account_id=m.account_id
+                WHERE m.job_id=? AND m.candidate_id=?
+                ORDER BY m.account_id LIMIT ? OFFSET ?
+            """, (job_id, candidate_id, limit, offset)).fetchall()
+        records = [MultiEventMemberEvidence(accountReferenceHmac=row["account_id"], reasons=json.loads(row["reasons_json"])) for row in rows]
+        next_cursor = str(offset + len(records)) if offset + len(records) < total else None
+        return MultiEventMemberEvidencePage(
             jobId=job_id, candidateId=candidate_id, ledgerVersionSetDigest=manifest.ledger_version_set_digest,
             cursor=cursor, nextCursor=next_cursor, totalCount=total, records=records,
         )

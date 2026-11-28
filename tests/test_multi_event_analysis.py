@@ -348,6 +348,10 @@ def test_same_accounts_repeatedly_coclustered_by_ip_window_only_is_stable_accoun
     assert candidate.score_breakdown.link == pytest.approx(0.5)
     assert candidate.score_breakdown.score == pytest.approx(0.1514, abs=1e-4)
     assert "ip_window" not in candidate.unavailable_signals
+    for member in candidate.member_reasons:
+        recurrence = next(reason for reason in member.reasons if reason.code == "REPEATED_PERFORMANCES")
+        assert recurrence.peer_count == 0
+        assert set(recurrence.performances) == {scope["performanceId"] for scope in scopes}
 
 
 def test_two_events_four_performances_with_shared_refund_account_has_full_recurrence():

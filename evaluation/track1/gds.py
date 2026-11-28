@@ -14,6 +14,13 @@ from .models import BaselineOutput, EvaluationRecord
 
 
 _ISOLATED_PROJECT_PATTERN = re.compile(r"^tdissue19gds[0-9a-f]{10}$")
+_EXISTING_VALIDATION_PROJECT = "ticket-defender-validation"
+_EXISTING_VALIDATION_CONTAINER = "ticket-defender-validation-neo4j"
+_EXISTING_VALIDATION_NETWORK = "ticket-defender-validation_default"
+_EXISTING_VALIDATION_VOLUMES = {
+    "/data": "ticket-defender-validation_neo4j-data",
+    "/logs": "ticket-defender-validation_neo4j-logs",
+}
 # 공식 배포물 이름입니다. 진위는 이름이 아니라 실행 스크립트의 SHA-256 확인으로 판단합니다.
 _EXPECTED_GDS_JAR = "neo4j-graph-data-science-2.6.6.jar"
 _EXPECTED_NEO4J_IMAGE = "neo4j:5.19.0"
@@ -47,14 +54,51 @@ def _has_expected_read_only_jar_mount(container: dict) -> bool:
     return False
 
 
-def verify_isolated_gds_target(uri: str) -> str | None:
-    """Return a safe-to-disclose failure code unless URI maps to the test Compose container.
+def _is_dedicated_existing_validation_container(container: dict, container_id: str) -> bool:
+    """기존 검증 인스턴스의 고정된 네트워크와 단독 볼륨을 확인합니다."""
 
-    The accepted target is deliberately narrower than a loopback URI: it must be
-    the dynamically mapped Bolt port of the read-only GDS container created by
-    ``tests/run_gds_integration.ps1``. This runs before importing or creating
-    ``GraphService`` and therefore before any Neo4j connection is attempted.
-    """
+    if (
+        container.get("Name") != f"/{_EXISTING_VALIDATION_CONTAINER}"
+        or container.get("State", {}).get("Status") != "running"
+        or set(container.get("NetworkSettings", {}).get("Networks", {})) != {_EXISTING_VALIDATION_NETWORK}
+    ):
+        return False
+
+    mounts = container.get("Mounts", [])
+    if len(mounts) != 3:
+        return False
+    mounted_volumes = {}
+    destinations = set()
+    for mount in mounts:
+        destination = mount.get("Destination")
+        destinations.add(destination)
+        if mount.get("Type") == "volume" and destination in _EXISTING_VALIDATION_VOLUMES:
+            if mount.get("Name") != _EXISTING_VALIDATION_VOLUMES[destination] or mount.get("RW") is not True:
+                return False
+            mounted_volumes[destination] = mount["Name"]
+        elif (
+            mount.get("Type") != "bind"
+            or destination != "/plugins/graph-data-science.jar"
+            or mount.get("RW") is not False
+            or Path(mount.get("Source", "")).name != _EXPECTED_GDS_JAR
+        ):
+            return False
+    if set(mounted_volumes) != set(_EXISTING_VALIDATION_VOLUMES) or destinations != {
+        "/data", "/logs", "/plugins/graph-data-science.jar"
+    }:
+        return False
+
+    for volume in mounted_volumes.values():
+        users = _docker_output([
+            "container", "ls", "--all", "--quiet", "--filter", f"volume={volume}",
+        ])
+        if not users or {item.strip() for item in users.splitlines() if item.strip()} != {container_id}:
+            return False
+    return True
+
+
+def verify_isolated_gds_target(uri: str) -> str | None:
+    """실행 전 URI가 격리된 테스트 Compose 컨테이너를 가리키는지 읽기 전용으로 확인합니다."""
 
     try:
         parsed = urlparse(uri)
@@ -80,12 +124,20 @@ def verify_isolated_gds_target(uri: str) -> str | None:
         return "NO_VERIFIED_GDS_CONTAINER"
 
     verified = []
-    for container in containers:
+    ids = container_ids.split()
+    if len(ids) != len(containers):
+        return "NO_VERIFIED_GDS_CONTAINER"
+    for container_id, container in zip(ids, containers):
         labels = container.get("Config", {}).get("Labels", {}) or {}
         project = labels.get("com.docker.compose.project", "")
+        project_is_isolated = bool(_ISOLATED_PROJECT_PATTERN.fullmatch(project))
+        project_is_existing_validation = (
+            project == _EXISTING_VALIDATION_PROJECT
+            and _is_dedicated_existing_validation_container(container, container_id)
+        )
         if (
             labels.get("com.docker.compose.service") != "neo4j"
-            or not _ISOLATED_PROJECT_PATTERN.fullmatch(project)
+            or not (project_is_isolated or project_is_existing_validation)
             or container.get("Config", {}).get("Image") != _EXPECTED_NEO4J_IMAGE
             or not _has_expected_read_only_jar_mount(container)
         ):

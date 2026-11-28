@@ -152,6 +152,63 @@ class GdsIsolationTests(unittest.TestCase):
         with patch("evaluation.track1.gds._docker_output", side_effect=["container-id\n", json.dumps([container])]):
             self.assertIsNone(gds.verify_isolated_gds_target("bolt://127.0.0.1:19001"))
 
+    def test_verifier_accepts_only_the_dedicated_existing_validation_container(self):
+        container = {
+            "Name": "/ticket-defender-validation-neo4j",
+            "State": {"Status": "running"},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "ticket-defender-validation",
+                    "com.docker.compose.service": "neo4j",
+                },
+                "Image": "neo4j:5.19.0",
+            },
+            "Mounts": [
+                {"Type": "volume", "Name": "ticket-defender-validation_neo4j-data", "Destination": "/data", "RW": True},
+                {"Type": "volume", "Name": "ticket-defender-validation_neo4j-logs", "Destination": "/logs", "RW": True},
+                {"Type": "bind", "Source": "C:/private/neo4j-graph-data-science-2.6.6.jar", "Destination": "/plugins/graph-data-science.jar", "RW": False},
+            ],
+            "NetworkSettings": {
+                "Networks": {"ticket-defender-validation_default": {}},
+                "Ports": {"7687/tcp": [{"HostIp": "127.0.0.1", "HostPort": "27697"}]},
+            },
+        }
+        with patch(
+            "evaluation.track1.gds._docker_output",
+            side_effect=["container-id\n", json.dumps([container]), "container-id\n", "container-id\n"],
+        ):
+            self.assertIsNone(gds.verify_isolated_gds_target("bolt://127.0.0.1:27697"))
+
+    def test_verifier_rejects_existing_validation_volume_shared_with_another_container(self):
+        container = {
+            "Name": "/ticket-defender-validation-neo4j",
+            "State": {"Status": "running"},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "ticket-defender-validation",
+                    "com.docker.compose.service": "neo4j",
+                },
+                "Image": "neo4j:5.19.0",
+            },
+            "Mounts": [
+                {"Type": "volume", "Name": "ticket-defender-validation_neo4j-data", "Destination": "/data", "RW": True},
+                {"Type": "volume", "Name": "ticket-defender-validation_neo4j-logs", "Destination": "/logs", "RW": True},
+                {"Type": "bind", "Source": "C:/private/neo4j-graph-data-science-2.6.6.jar", "Destination": "/plugins/graph-data-science.jar", "RW": False},
+            ],
+            "NetworkSettings": {
+                "Networks": {"ticket-defender-validation_default": {}},
+                "Ports": {"7687/tcp": [{"HostIp": "127.0.0.1", "HostPort": "27697"}]},
+            },
+        }
+        with patch(
+            "evaluation.track1.gds._docker_output",
+            side_effect=["container-id\n", json.dumps([container]), "container-id\nother-id\n"],
+        ):
+            self.assertEqual(
+                gds.verify_isolated_gds_target("bolt://127.0.0.1:27697"),
+                "NO_VERIFIED_GDS_CONTAINER",
+            )
+
     def test_verifier_rejects_near_matching_compose_metadata(self):
         matching_container = {
             "Config": {

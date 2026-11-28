@@ -16,6 +16,12 @@
   고정한다.
 - 모든 ticket은 하나의 supplier namespace, `TRACK1_CONNECTION` purpose, 하나의 HMAC key
   version을 사용해야 한다.
+- PR 3 선택 메타데이터 `seatZone`, `seatRow`, `seatNumber`, `reservedAt`, `paidAt`,
+  `accountCreatedAt`을 활성 ticket에 포함할 수 있다. 좌석 문자열은 1~64자이고 시각은 시간대가
+  있는 ISO 8601 형식이어야 한다. 이 필드들은 현재 exp2 후보 연결과 점수 계산에 쓰지 않으며,
+  기존 요청에서는 생략할 수 있다.
+- 취소 티켓은 `cancelledTickets` 또는 NDJSON v2의 `CANCELLED_TICKET` 레코드로 별도 전달한다.
+  취소 레코드는 활성 ticket 행과 신호 입력에 합치지 않으며 exp2 구매 수량과 점수를 바꾸지 않는다.
 - 동일 예약 안에 여러 티켓 행이 있을 수 있으므로 Backend가 고정 scope별 `sourceRowOrdinal`을
   함께 보낸다. 이 값은 행 중복 검증에만 쓰며 계정 연결, 신호 또는 외부 식별자로 사용하지 않는다.
 - input은 `extra=forbid`이며 이 JSON 경로는 ticket 최대 50,000개다. 400,000행 경로는 별도
@@ -96,8 +102,8 @@ opaque 객체 이름이다.
   `performanceId`, 고정 원장 버전, source batch와 선택적 정책 snapshot을 가진다. Data는
   Backend와 같은 Java UTF-16 길이 접두 방식으로 내부 event UUID, performance UUID, 원장
   version UUID의 canonical 집합 digest를 재계산한다.
-- 각 NDJSON 행은 기존 `MultiEventTicketInput` 별칭을 사용하고 artifact 전용으로
-  `sourceRowOrdinal`을 필수화한다. ordinal은 각 고정 원장 scope에서 유일해야 한다. 행의
+- 각 활성 NDJSON 행은 기존 `MultiEventTicketInput` 별칭과 위 선택 메타데이터를 지원하고 artifact
+  전용으로 `sourceRowOrdinal`을 필수화한다. ordinal은 각 고정 원장 scope에서 유일해야 한다. 행의
   supplier, purpose, key version, event/performance/version은 manifest와 일치해야 한다.
 - 한 줄은 1 MiB, 전체 artifact는 서버 `MULTI_EVENT_ARTIFACT_MAX_BYTES` 설정으로 제한하며
   기본값은 1 GiB다. 실제 스트림 SHA-256, S3 VersionId, 행 수와 고정 scope를 확인한 뒤에만

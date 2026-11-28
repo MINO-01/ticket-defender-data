@@ -32,6 +32,11 @@ from services.multi_event_candidates import (
     require_comparison_budget,
     token_damping,
 )
+from services.multi_event_candidate_families import (
+    assign_candidate_families,
+    build_evidence_reasons,
+    reason_code,
+)
 from services.track1_scoring_exp2 import (
     BASE_SIGNALS,
     SCORE_VERSION_EXP2,
@@ -224,6 +229,7 @@ def analyze_multi_event(
         covered: dict[str, set[str]] = defaultdict(set)
         dampings: dict[str, list[float]] = defaultdict(list)
         excluded: set[str] = set()
+        shared_reason_groups: list[tuple[str, str, set[str]]] = []
         for (scope_key, signal, token), owners in member_owners.items():
             if len(owners) < 2:
                 continue
@@ -235,6 +241,8 @@ def analyze_multi_event(
                 continue
             dampings[signal].append(factor)
             covered[signal].update(owners)
+            if reason_code(signal) is not None:
+                shared_reason_groups.append((signal, scopes[scope_key].performance_id, owners))
         link = link_inputs(len(accounts), {signal: len(values) for signal, values in covered.items()}, dampings, excluded)
         quantity = _quantity_for_candidate(accounts, source_scopes, quantity_contexts)
         evaluation = evaluate_candidate(
@@ -243,6 +251,19 @@ def analyze_multi_event(
         if evaluation is None:
             continue
         score = evaluation.score
+        candidate_reasons, member_reasons = build_evidence_reasons(
+            accounts,
+            (scopes[key].performance_id for key in source_keys),
+            shared_reason_groups,
+            {
+                account: {
+                    performance_id
+                    for scope_key, performance_id, _community_id in memberships.get(account, ())
+                    if scope_key in source_keys
+                }
+                for account in accounts
+            },
+        )
         relationships = [
             MultiEventRelationship(
                 signalType=relation_type,
@@ -271,8 +292,18 @@ def analyze_multi_event(
             ),
             memberAccountIds=sorted(accounts),
             relationships=relationships,
+            reasons=candidate_reasons,
+            memberReasons=member_reasons,
         ))
     candidates.sort(key=lambda item: (-item.score_breakdown.score, item.candidate_id))
+    family_metadata = assign_candidate_families(
+        {candidate.candidate_id: set(candidate.member_account_ids) for candidate in candidates},
+        {candidate.candidate_id: candidate.score_breakdown.score for candidate in candidates},
+    )
+    candidates = [
+        candidate.model_copy(update=family_metadata[candidate.candidate_id])
+        for candidate in candidates
+    ]
     return MultiEventAnalysisResponse(
         analysisId=request.analysis_id,
         ledgerVersionSetDigest=request.ledger_version_set_digest,

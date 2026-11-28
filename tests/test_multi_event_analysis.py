@@ -87,6 +87,89 @@ def test_multi_event_candidate_uses_verified_strong_signal_without_exposing_toke
     assert _token("e") not in candidate.model_dump_json()
 
 
+def test_cancelled_tickets_are_optional_separate_evidence_and_do_not_change_exp2_result():
+    payload = _payload()
+    first, second = payload["ledgerScopes"]
+    payload["tickets"] = [
+        _ticket(first, "a", "1", phoneHash=_token("e")),
+        _ticket(first, "b", "2", phoneHash=_token("e")),
+        _ticket(second, "a", "3", phoneHash=_token("e")),
+        _ticket(second, "b", "4", phoneHash=_token("e")),
+    ]
+    without_cancelled = _analyze(payload)
+    payload["cancelledTickets"] = [{
+        "accountHmac": _token("a"), "ticketHmac": _token("b"),
+        "eventId": first["eventId"], "performanceId": first["performanceId"],
+        "ledgerVersionId": first["ledgerVersionId"], "supplierNamespace": "supplier-a",
+        "hmacPurpose": "TRACK1_CONNECTION", "hmacKeyVersion": "v1",
+        "sourceVersion": "cancel-source-v1", "sourceRowOrdinal": 99,
+        "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+        "cancelledAt": "2025-12-20T10:00:00Z",
+    }]
+    with_cancelled = _analyze(payload)
+    assert with_cancelled.model_dump(mode="json", by_alias=True) == without_cancelled.model_dump(mode="json", by_alias=True)
+
+
+def test_active_ticket_v3_metadata_is_optional_and_does_not_change_exp2_result():
+    payload = _payload()
+    first, second = payload["ledgerScopes"]
+    tickets = [
+        _ticket(first, "a", "1", phoneHash=_token("e")),
+        _ticket(first, "b", "2", phoneHash=_token("e")),
+        _ticket(second, "a", "3", phoneHash=_token("e")),
+        _ticket(second, "b", "4", phoneHash=_token("e")),
+    ]
+    payload["tickets"] = tickets
+    baseline = _analyze(payload)
+
+    for ticket in tickets:
+        ticket.update({
+            "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+            "reservedAt": "2025-12-20T09:00:00Z", "paidAt": "2025-12-20T09:05:00Z",
+            "accountCreatedAt": "2024-01-03T00:00:00Z",
+        })
+    enriched = _analyze(payload)
+
+    assert enriched.model_dump(mode="json", by_alias=True) == baseline.model_dump(mode="json", by_alias=True)
+
+
+def test_active_ticket_v3_metadata_keeps_bounds_and_aware_datetime_validation():
+    payload = _payload()
+    first, _second = payload["ledgerScopes"]
+    payload["tickets"] = [_ticket(first, "a", "1", phoneHash=_token("e"), seatZone="x" * 65)]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+    payload["tickets"] = [_ticket(first, "a", "1", phoneHash=_token("e"), reservedAt="2025-12-20T09:00:00")]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+
+def test_cancelled_ticket_scope_duplicate_and_extra_fields_are_rejected():
+    payload = _payload()
+    first, _second = payload["ledgerScopes"]
+    payload["tickets"] = [_ticket(first, "a", "1", phoneHash=_token("e"))]
+    cancelled = {
+        "accountHmac": _token("a"), "ticketHmac": _token("b"),
+        "eventId": first["eventId"], "performanceId": first["performanceId"],
+        "ledgerVersionId": first["ledgerVersionId"], "supplierNamespace": "supplier-a",
+        "hmacPurpose": "TRACK1_CONNECTION", "hmacKeyVersion": "v1",
+        "sourceVersion": "cancel-source-v1", "sourceRowOrdinal": 99,
+        "cancelledAt": "2025-12-20T10:00:00Z",
+    }
+    payload["cancelledTickets"] = [cancelled, cancelled]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+    payload["cancelledTickets"] = [{**cancelled, "eventId": "unlisted-event"}]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+    payload["cancelledTickets"] = [{**cancelled, "rawTicketNumber": "must-not-be-accepted"}]
+    with pytest.raises(ValidationError):
+        MultiEventAnalysisRequest.model_validate(payload)
+
+
 def test_payment_or_ip_only_without_repeated_cocluster_never_links_candidate():
     """같은 계정이 결제와 IP 시간창만 공유해도 두 회차에서 같은 군집이 아니면 후보가 아닙니다."""
     payload = _payload()
@@ -348,6 +431,10 @@ def test_same_accounts_repeatedly_coclustered_by_ip_window_only_is_stable_accoun
     assert candidate.score_breakdown.link == pytest.approx(0.5)
     assert candidate.score_breakdown.score == pytest.approx(0.1514, abs=1e-4)
     assert "ip_window" not in candidate.unavailable_signals
+    for member in candidate.member_reasons:
+        recurrence = next(reason for reason in member.reasons if reason.code == "REPEATED_PERFORMANCES")
+        assert recurrence.peer_count == 0
+        assert set(recurrence.performances) == {scope["performanceId"] for scope in scopes}
 
 
 def test_two_events_four_performances_with_shared_refund_account_has_full_recurrence():

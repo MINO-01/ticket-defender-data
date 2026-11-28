@@ -90,6 +90,12 @@ class MultiEventTicketInput(BaseModel):
     source_version: ShortText = Field(alias="sourceVersion")
     source_row_ordinal: StrictInt | None = Field(default=None, alias="sourceRowOrdinal", ge=1, le=400_000)
     purchased_at: AwareDatetime | None = Field(default=None, alias="purchasedAt")
+    seat_zone: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = Field(default=None, alias="seatZone")
+    seat_row: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = Field(default=None, alias="seatRow")
+    seat_number: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = Field(default=None, alias="seatNumber")
+    reserved_at: AwareDatetime | None = Field(default=None, alias="reservedAt")
+    paid_at: AwareDatetime | None = Field(default=None, alias="paidAt")
+    account_created_at: AwareDatetime | None = Field(default=None, alias="accountCreatedAt")
     effective_ticket_quantity: StrictInt | None = Field(default=None, alias="effectiveTicketQuantity", ge=1, le=100)
     confirmed_purchase_limit: StrictInt | None = Field(default=None, alias="confirmedPurchaseLimit", ge=1, le=100)
     quantity_policy_snapshot_id: UUIDText | None = Field(default=None, alias="quantityPolicySnapshotId")
@@ -137,6 +143,44 @@ class MultiEventTicketInput(BaseModel):
         return self.account_id, self.reservation_no, self.ledger_version_id, self.source_row_ordinal
 
 
+class MultiEventCancelledTicketInput(BaseModel):
+    """Separate pseudonymous cancellation evidence; it is never an active ticket row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_hmac: HashToken = Field(alias="accountHmac")
+    ticket_hmac: HashToken = Field(alias="ticketHmac")
+    event_id: ShortText = Field(alias="eventId")
+    performance_id: UUIDText = Field(alias="performanceId")
+    ledger_version_id: UUIDText = Field(alias="ledgerVersionId")
+    supplier_namespace: ShortText = Field(alias="supplierNamespace")
+    hmac_purpose: Literal["TRACK1_CONNECTION"] = Field(alias="hmacPurpose")
+    hmac_key_version: ShortText = Field(alias="hmacKeyVersion")
+    source_version: ShortText = Field(alias="sourceVersion")
+    source_row_ordinal: StrictInt = Field(alias="sourceRowOrdinal", ge=1, le=400_000)
+    seat_zone: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = Field(default=None, alias="seatZone")
+    seat_row: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = Field(default=None, alias="seatRow")
+    seat_number: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = Field(default=None, alias="seatNumber")
+    cancelled_at: AwareDatetime = Field(alias="cancelledAt")
+
+    @property
+    def scope_key(self) -> tuple[str, str, str]:
+        return self.event_id, self.performance_id, self.ledger_version_id
+
+    @property
+    def row_key(self) -> tuple[str, str, str, int]:
+        return self.account_hmac, self.ticket_hmac, self.ledger_version_id, self.source_row_ordinal
+
+
+class MultiEventArtifactCancelledTicketRecord(BaseModel):
+    """Version 2 NDJSON envelope. Cancellation rows never enter the active row pipeline."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    record_type: Literal["CANCELLED_TICKET"] = Field(alias="recordType")
+    cancelled_ticket: MultiEventCancelledTicketInput = Field(alias="cancelledTicket")
+
+
 class MultiEventAnalysisRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -152,6 +196,9 @@ class MultiEventAnalysisRequest(BaseModel):
     # required only by the immutable artifact manifest below.
     ledger_scopes: list[MultiEventLedgerScope] = Field(alias="ledgerScopes", min_length=2, max_length=500)
     tickets: list[MultiEventTicketInput] = Field(min_length=1, max_length=50_000)
+    cancelled_tickets: list[MultiEventCancelledTicketInput] = Field(
+        default_factory=list, alias="cancelledTickets", max_length=50_000
+    )
 
     @model_validator(mode="after")
     def validate_fixed_scope(self, info: ValidationInfo):
@@ -166,6 +213,8 @@ class MultiEventAnalysisRequest(BaseModel):
         scopes_by_key = {scope.key: scope for scope in self.ledger_scopes}
         if any(ticket.scope_key not in scope_set for ticket in self.tickets):
             raise PydanticCustomError("ticket_scope_mismatch", "Ticket scope must be fixed by ledgerScopes")
+        if any(ticket.scope_key not in scope_set for ticket in self.cancelled_tickets):
+            raise PydanticCustomError("cancelled_ticket_scope_mismatch", "Cancelled ticket scope must be fixed by ledgerScopes")
         if any(ticket.quantity_status == "COMPLETE"
                and ticket.quantity_policy_snapshot_id != scopes_by_key[ticket.scope_key].policy_snapshot_id
                for ticket in self.tickets):
@@ -177,9 +226,17 @@ class MultiEventAnalysisRequest(BaseModel):
                         if ticket.source_row_ordinal is not None]
         if len(row_ordinals) != len(set(row_ordinals)):
             raise PydanticCustomError("duplicate_source_row", "Source row ordinals must be unique within each ledger scope")
-        suppliers = {ticket.supplier_namespace for ticket in self.tickets}
-        key_versions = {ticket.hmac_key_version for ticket in self.tickets}
-        purposes = {ticket.hmac_purpose for ticket in self.tickets}
+        cancelled_row_keys = [ticket.row_key for ticket in self.cancelled_tickets]
+        if len(cancelled_row_keys) != len(set(cancelled_row_keys)):
+            raise PydanticCustomError("duplicate_cancelled_ticket", "Duplicate cancelled ticket evidence is not allowed")
+        cancelled_row_ordinals = [(ticket.scope_key, ticket.source_row_ordinal) for ticket in self.cancelled_tickets]
+        if (len(cancelled_row_ordinals) != len(set(cancelled_row_ordinals))
+                or set(row_ordinals).intersection(cancelled_row_ordinals)):
+            raise PydanticCustomError("duplicate_source_row", "Source row ordinals must be unique across active and cancelled records")
+        identity_rows = [*self.tickets, *self.cancelled_tickets]
+        suppliers = {ticket.supplier_namespace for ticket in identity_rows}
+        key_versions = {ticket.hmac_key_version for ticket in identity_rows}
+        purposes = {ticket.hmac_purpose for ticket in identity_rows}
         if len(suppliers) != 1 or len(key_versions) != 1 or purposes != {"TRACK1_CONNECTION"}:
             raise PydanticCustomError("identity_contract_mixed", "Supplier, purpose, and key version must be uniform")
         return self
@@ -200,7 +257,8 @@ class MultiEventArtifactManifest(BaseModel):
     object_version: BulkId = Field(alias="objectVersion")
     sha256: HashToken
     record_count: StrictInt = Field(alias="recordCount", ge=1, le=400_000)
-    input_format_version: Literal["multi-event-exp2-ndjson-v1"] = Field(alias="inputFormatVersion")
+    cancelled_ticket_record_count: StrictInt = Field(default=0, alias="cancelledTicketRecordCount", ge=0, le=399_999)
+    input_format_version: Literal["multi-event-exp2-ndjson-v1", "multi-event-exp2-ndjson-v2"] = Field(alias="inputFormatVersion")
     analysis_id: UUIDText = Field(alias="analysisId")
     tenant_id: UUIDText = Field(alias="tenantId")
     ledger_version_set_digest: HashToken = Field(alias="ledgerVersionSetDigest")
@@ -217,6 +275,10 @@ class MultiEventArtifactManifest(BaseModel):
     @model_validator(mode="after")
     def validate_manifest(self, info: ValidationInfo):
         _reject_retired_score_version(self.score_version, info)
+        if self.cancelled_ticket_record_count >= self.record_count:
+            raise PydanticCustomError("INVALID_CANCELLED_TICKET_COUNT", "artifact must contain at least one active ticket row")
+        if self.input_format_version == "multi-event-exp2-ndjson-v1" and self.cancelled_ticket_record_count != 0:
+            raise PydanticCustomError("INVALID_CANCELLED_TICKET_FORMAT", "cancelled ticket rows require NDJSON v2")
         if any(separator in self.object_key for separator in ("/", "\\", ":")):
             raise PydanticCustomError("INVALID_ARTIFACT_REFERENCE", "objectKey must be an opaque object name")
         if self.analysis_end_at <= self.analysis_start_at or self.analysis_end_at > self.analysis_as_of:
@@ -309,6 +371,55 @@ class MultiEventCandidateSummary(BaseModel):
     unavailable_signals: list[str] = Field(alias="unavailableSignals", max_length=10)
     normal_sharing_possibilities: list[str] = Field(alias="normalSharingPossibilities", max_length=10)
     score_breakdown: MultiEventScoreBreakdown = Field(alias="scoreBreakdown")
+    family_id: str | None = Field(default=None, alias="familyId", max_length=128)
+    parent_candidate_id: str | None = Field(default=None, alias="parentCandidateId", max_length=128)
+    child_count: StrictInt = Field(default=0, alias="childCount", ge=0)
+    family_score: float | None = Field(default=None, alias="familyScore", ge=0, le=1, allow_inf_nan=False)
+    reasons: list["MultiEventEvidenceReason"] = Field(default_factory=list, max_length=10)
+
+
+class MultiEventEvidenceReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal[
+        "SHARED_REFUND_ACCOUNT", "SHARED_PHONE", "SHARED_DEVICE", "SHARED_ADDRESS",
+        "IP_SAME_WINDOW", "REBOOK_CHAIN", "RESOURCE_CONTINUITY",
+        "REPEATED_PERFORMANCES", "HIGH_QUANTITY",
+    ]
+    count: StrictInt = Field(ge=1)
+    performances: list[UUIDText] = Field(min_length=1, max_length=500)
+    strength_rank: StrictInt = Field(alias="strengthRank", ge=1)
+
+
+class MultiEventMemberEvidenceReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal[
+        "SHARED_REFUND_ACCOUNT", "SHARED_PHONE", "SHARED_DEVICE", "SHARED_ADDRESS",
+        "IP_SAME_WINDOW", "REBOOK_CHAIN", "RESOURCE_CONTINUITY",
+        "REPEATED_PERFORMANCES", "HIGH_QUANTITY",
+    ]
+    peer_count: StrictInt = Field(alias="peerCount", ge=0)
+    performances: list[UUIDText] = Field(max_length=500)
+
+
+class MultiEventMemberEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_reference_hmac: HashToken = Field(alias="accountReferenceHmac")
+    reasons: list[MultiEventMemberEvidenceReason] = Field(max_length=10)
+
+
+class MultiEventMemberEvidencePage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    candidate_id: str = Field(alias="candidateId", min_length=1, max_length=128)
+    ledger_version_set_digest: HashToken = Field(alias="ledgerVersionSetDigest")
+    cursor: str | None = Field(default=None, pattern=r"^\d+$")
+    next_cursor: str | None = Field(default=None, alias="nextCursor", pattern=r"^\d+$")
+    total_count: StrictInt = Field(alias="totalCount", ge=0, le=50_000)
+    records: list[MultiEventMemberEvidence]
 
 
 class MultiEventCandidatePage(BaseModel):
@@ -385,6 +496,12 @@ class MultiEventCandidate(BaseModel):
     score_breakdown: MultiEventScoreBreakdown = Field(alias="scoreBreakdown")
     member_account_ids: list[HashToken] = Field(alias="memberAccountIds", min_length=2, max_length=50_000)
     relationships: list[MultiEventRelationship] = Field(alias="relationships", min_length=1, max_length=50_000)
+    family_id: str | None = Field(default=None, alias="familyId", max_length=128)
+    parent_candidate_id: str | None = Field(default=None, alias="parentCandidateId", max_length=128)
+    child_count: StrictInt = Field(default=0, alias="childCount", ge=0)
+    family_score: float | None = Field(default=None, alias="familyScore", ge=0, le=1, allow_inf_nan=False)
+    reasons: list[MultiEventEvidenceReason] = Field(default_factory=list, max_length=10)
+    member_reasons: list[MultiEventMemberEvidence] = Field(default_factory=list, alias="memberReasons", max_length=50_000)
 
 
 class MultiEventAnalysisResponse(BaseModel):

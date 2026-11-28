@@ -12,7 +12,7 @@ from schemas.dto import (
 )
 from services.track1_scoring import (
     PROJECTION_VERSION, SCORE_VERSION, GraphResultInvalid,
-    build_account_token_graph, clusters_from_account_communities, purchase_limit_evaluations,
+    _coerce_index, build_account_token_graph, clusters_from_account_communities, purchase_limit_evaluations,
     shared_signal_observations,
 )
 from services.track1_bulk_jobs import GdsResourceExhausted, JobCancelled
@@ -202,8 +202,8 @@ class GraphService:
                         )
                         grouped = {}
                         async for row in result:
-                            index = row["accountIndex"]
-                            if isinstance(index, int) and 0 <= index < len(graph.accounts):
+                            index = _coerce_index(row["accountIndex"])
+                            if 0 <= index < len(graph.accounts):
                                 grouped.setdefault(int(row["communityId"]), set()).add(graph.accounts[index].account_id)
                         seen = set().union(*grouped.values()) if grouped else set()
                         if seen != {account.account_id for account in graph.accounts}:

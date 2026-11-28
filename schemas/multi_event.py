@@ -371,6 +371,55 @@ class MultiEventCandidateSummary(BaseModel):
     unavailable_signals: list[str] = Field(alias="unavailableSignals", max_length=10)
     normal_sharing_possibilities: list[str] = Field(alias="normalSharingPossibilities", max_length=10)
     score_breakdown: MultiEventScoreBreakdown = Field(alias="scoreBreakdown")
+    family_id: str | None = Field(default=None, alias="familyId", max_length=128)
+    parent_candidate_id: str | None = Field(default=None, alias="parentCandidateId", max_length=128)
+    child_count: StrictInt = Field(default=0, alias="childCount", ge=0)
+    family_score: float | None = Field(default=None, alias="familyScore", ge=0, le=1, allow_inf_nan=False)
+    reasons: list["MultiEventEvidenceReason"] = Field(default_factory=list, max_length=10)
+
+
+class MultiEventEvidenceReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal[
+        "SHARED_REFUND_ACCOUNT", "SHARED_PHONE", "SHARED_DEVICE", "SHARED_ADDRESS",
+        "IP_SAME_WINDOW", "REBOOK_CHAIN", "RESOURCE_CONTINUITY",
+        "REPEATED_PERFORMANCES", "HIGH_QUANTITY",
+    ]
+    count: StrictInt = Field(ge=1)
+    performances: list[UUIDText] = Field(min_length=1, max_length=500)
+    strength_rank: StrictInt = Field(alias="strengthRank", ge=1)
+
+
+class MultiEventMemberEvidenceReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal[
+        "SHARED_REFUND_ACCOUNT", "SHARED_PHONE", "SHARED_DEVICE", "SHARED_ADDRESS",
+        "IP_SAME_WINDOW", "REBOOK_CHAIN", "RESOURCE_CONTINUITY",
+        "REPEATED_PERFORMANCES", "HIGH_QUANTITY",
+    ]
+    peer_count: StrictInt = Field(alias="peerCount", ge=0)
+    performances: list[UUIDText] = Field(max_length=500)
+
+
+class MultiEventMemberEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_reference_hmac: HashToken = Field(alias="accountReferenceHmac")
+    reasons: list[MultiEventMemberEvidenceReason] = Field(max_length=10)
+
+
+class MultiEventMemberEvidencePage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUIDText = Field(alias="jobId")
+    candidate_id: str = Field(alias="candidateId", min_length=1, max_length=128)
+    ledger_version_set_digest: HashToken = Field(alias="ledgerVersionSetDigest")
+    cursor: str | None = Field(default=None, pattern=r"^\d+$")
+    next_cursor: str | None = Field(default=None, alias="nextCursor", pattern=r"^\d+$")
+    total_count: StrictInt = Field(alias="totalCount", ge=0, le=50_000)
+    records: list[MultiEventMemberEvidence]
 
 
 class MultiEventCandidatePage(BaseModel):
@@ -447,6 +496,12 @@ class MultiEventCandidate(BaseModel):
     score_breakdown: MultiEventScoreBreakdown = Field(alias="scoreBreakdown")
     member_account_ids: list[HashToken] = Field(alias="memberAccountIds", min_length=2, max_length=50_000)
     relationships: list[MultiEventRelationship] = Field(alias="relationships", min_length=1, max_length=50_000)
+    family_id: str | None = Field(default=None, alias="familyId", max_length=128)
+    parent_candidate_id: str | None = Field(default=None, alias="parentCandidateId", max_length=128)
+    child_count: StrictInt = Field(default=0, alias="childCount", ge=0)
+    family_score: float | None = Field(default=None, alias="familyScore", ge=0, le=1, allow_inf_nan=False)
+    reasons: list[MultiEventEvidenceReason] = Field(default_factory=list, max_length=10)
+    member_reasons: list[MultiEventMemberEvidence] = Field(default_factory=list, alias="memberReasons", max_length=50_000)
 
 
 class MultiEventAnalysisResponse(BaseModel):

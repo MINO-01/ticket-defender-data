@@ -281,6 +281,57 @@ def test_cancelled_artifact_records_are_separate_from_exp2_rows(tmp_path):
     )
 
 
+def test_clear_stage_removes_cancelled_tickets_and_candidate_member_reasons(tmp_path):
+    scopes = _scopes()
+    active = _ticket(scopes[0], "a", 1, 1)
+    cancelled = {
+        "recordType": "CANCELLED_TICKET",
+        "cancelledTicket": {
+            "accountHmac": _hash("f"), "ticketHmac": _hash("e"),
+            "eventId": scopes[0]["eventId"], "performanceId": scopes[0]["performanceId"],
+            "ledgerVersionId": scopes[0]["ledgerVersionId"],
+            "supplierNamespace": "supplier-a", "hmacPurpose": "TRACK1_CONNECTION",
+            "hmacKeyVersion": "key-v1", "sourceVersion": "cancel-source-v1",
+            "sourceRowOrdinal": 2, "cancelledAt": "2025-12-20T10:00:00Z",
+        },
+    }
+    raw = b"".join(json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in (active, cancelled))
+    payload = _manifest_payload(scopes, raw, 2)
+    payload["inputFormatVersion"] = "multi-event-exp2-ndjson-v2"
+    payload["cancelledTicketRecordCount"] = 1
+    manifest = MultiEventArtifactManifest.model_validate(payload)
+    repository = MultiEventArtifactJobRepository(tmp_path / "stage-cleanup.sqlite")
+    accepted = repository.create("stage-cleanup", manifest)
+    assert repository.start(accepted.job_id)
+    repository.ingest(accepted.job_id, [raw], manifest)
+
+    with sqlite3.connect(repository.path) as db:
+        db.execute(
+            "INSERT INTO mei_artifact_candidates VALUES(?,?,?,?,?,?,?,?,?)",
+            (accepted.job_id, "candidate-cleanup", "MEDIUM", 0.25, 1, 1, 1, 0, "{}"),
+        )
+        db.execute(
+            "INSERT INTO mei_artifact_candidate_members VALUES(?,?,?)",
+            (accepted.job_id, "candidate-cleanup", _hash("a")),
+        )
+        db.execute(
+            "INSERT INTO mei_artifact_candidate_member_reasons VALUES(?,?,?,?)",
+            (accepted.job_id, "candidate-cleanup", _hash("a"), "[]"),
+        )
+
+    repository.clear_stage(accepted.job_id)
+
+    with sqlite3.connect(repository.path) as db:
+        assert db.execute(
+            "SELECT count(*) FROM mei_artifact_candidate_member_reasons WHERE job_id=?",
+            (accepted.job_id,),
+        ).fetchone()[0] == 0
+        assert db.execute(
+            "SELECT count(*) FROM mei_artifact_cancelled_tickets WHERE job_id=?",
+            (accepted.job_id,),
+        ).fetchone()[0] == 0
+
+
 def test_artifact_rows_add_v3_metadata_columns_without_losing_legacy_rows(tmp_path):
     path = tmp_path / "legacy-artifact.sqlite"
     with sqlite3.connect(path) as db:
@@ -513,7 +564,8 @@ def test_json_and_artifact_paths_produce_identical_candidates(tmp_path, monkeypa
         return {
             "id": candidate.candidate_id,
             "members": tuple(candidate.member_account_ids),
-            "summary": candidate.model_dump(mode="json", by_alias=True, exclude={"member_account_ids", "relationships"}),
+            "summary": candidate.model_dump(mode="json", by_alias=True, exclude={"member_account_ids", "relationships", "member_reasons"}),
+            "member_reasons": [item.model_dump(mode="json", by_alias=True) for item in candidate.member_reasons],
             "relationships": sorted(
                 (relation.signal_type, tuple(sorted(scope.performance_id for scope in relation.source_scopes)))
                 for relation in candidate.relationships
@@ -527,6 +579,7 @@ def test_json_and_artifact_paths_produce_identical_candidates(tmp_path, monkeypa
             "id": summary.candidate_id,
             "members": tuple(members.records),
             "summary": summary.model_dump(mode="json", by_alias=True),
+            "member_reasons": [item.model_dump(mode="json", by_alias=True) for item in repository.member_reason_page(job_id, summary.candidate_id, None, 500).records],
             "relationships": sorted(
                 (relation.signal_type, tuple(sorted(scope.performance_id for scope in relation.source_scopes)))
                 for relation in relations.records
@@ -612,6 +665,11 @@ def test_artifact_ip_window_only_cocluster_candidate_and_dormitory_counterexampl
     assert records[0].score_breakdown.score == pytest.approx(0.1514, abs=1e-4)
     relations = repository.relationship_page(job_id, records[0].candidate_id, None, 10).records
     assert [relation.signal_type for relation in relations] == ["stable_account_cocluster"]
+    member_reasons = repository.member_reason_page(job_id, records[0].candidate_id, None, 10).records
+    for member in member_reasons:
+        recurrence = next(reason for reason in member.reasons if reason.code == "REPEATED_PERFORMANCES")
+        assert recurrence.peer_count == 0
+        assert set(recurrence.performances) == {scope["performanceId"] for scope in scopes}
 
     dorm_scopes = _scopes_for(["event-0", "event-1"])
     dorm = [

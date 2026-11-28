@@ -50,7 +50,7 @@ class _Session:
             return _Result([{"nodeCount": len(nodes)}])
         if "gds.louvain.stream" in query:
             indices = self.graphs[parameters["graph_name"]]
-            return _Result([{"accountIndex": index, "communityId": 17} for index in indices])
+            return _Result([{"accountIndex": float(index), "communityId": 17} for index in indices])
         return _Result([{"graphName": parameters.get("graph_name")}])
 
 

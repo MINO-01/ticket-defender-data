@@ -21,7 +21,7 @@ Counts and totals are calculated after selecting the latest ledger revision for 
 - `activeSourceRowCount = ticketUnitRowCount + orderLineRowCount`;
 - `actualTicketQuantity = ticketUnitRowCount + orderLineTicketQuantity`.
 
-The scope manifest states the expected active account count, source row counts, and totals. Data must reject duplicate account-scope evidence, scope or provenance mismatches, and any bundle whose account rows do not add up to the manifest. The completeness flags also carry the ledger full-snapshot result, cancellation handling, duplicate handling, and the deterministic latest-revision rule. An incomplete source is not made complete by matching counts.
+The scope manifest states the expected active account count, source row counts, and totals. A bundle contains one analysis, tenant, supplier, HMAC purpose/key version, and analysis time range; each event/performance appears once. Data must reject duplicate account-scope evidence, scope or provenance mismatches, cross-tenant/supplier bundles, and any bundle whose account rows do not add up to the manifest. The completeness flags also carry the ledger full-snapshot result, cancellation handling, duplicate handling, and the deterministic latest-revision rule. An incomplete source is not made complete by matching counts.
 
 ## Policy proof and Q
 

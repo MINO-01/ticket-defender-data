@@ -145,6 +145,21 @@ def test_bundle_rejects_tenant_or_analysis_scope_mixing():
         validate_quantity_evidence_bundle([manifest], [evidence])
 
 
+def test_bundle_rejects_multiple_tenants_or_suppliers():
+    first = Exp3QuantityScopeManifest.model_validate(_manifest())
+    second = Exp3QuantityScopeManifest.model_validate(
+        _manifest(
+            analysisId=first.analysis_id,
+            analysisStartAt=first.analysis_start_at.isoformat(),
+            analysisEndAt=first.analysis_end_at.isoformat(),
+            tenantId=str(uuid4()),
+        )
+    )
+
+    with pytest.raises(ValueError, match="quantity_bundle_identity_mixed"):
+        validate_quantity_evidence_bundle([first, second], [])
+
+
 def test_analysis_period_must_not_exceed_source_as_of():
     with pytest.raises(ValidationError, match="invalid_quantity_analysis_period"):
         Exp3QuantityScopeManifest.model_validate(

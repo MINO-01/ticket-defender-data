@@ -145,6 +145,17 @@ def validate_quantity_evidence_bundle(
     """Reject a sidecar that is cross-scope, duplicated, or incomplete vs its manifest."""
     if not manifests:
         raise ValueError("quantity_scope_manifest_required")
+    bundle_identities = {
+        (manifest.analysis_id, manifest.tenant_id, manifest.supplier_namespace, manifest.hmac_purpose,
+         manifest.hmac_key_version, manifest.analysis_start_at, manifest.analysis_end_at)
+        for manifest in manifests
+    }
+    if len(bundle_identities) != 1:
+        raise ValueError("quantity_bundle_identity_mixed")
+    performance_scopes = {(manifest.analysis_id, manifest.event_id, manifest.performance_id)
+                          for manifest in manifests}
+    if len(performance_scopes) != len(manifests):
+        raise ValueError("duplicate_quantity_performance_scope")
     manifest_by_scope = {manifest.scope_key: manifest for manifest in manifests}
     if len(manifest_by_scope) != len(manifests):
         raise ValueError("duplicate_quantity_scope_manifest")

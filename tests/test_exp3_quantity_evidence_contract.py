@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from schemas.exp3_quantity_evidence import (
     Exp3AccountQuantityEvidence,
     Exp3QuantityScopeManifest,
+    Exp3RebookingEventRecord,
     validate_quantity_evidence_bundle,
 )
 
@@ -49,6 +50,9 @@ def _manifest(**overrides):
         "expectedOrderLineRowCount": 1,
         "expectedOrderLineTicketQuantity": 3,
         "expectedActualTicketQuantity": 4,
+        "rebookingEvidenceStatus": "COMPLETE",
+        "expectedReservationEventCount": 0,
+        "expectedCancellationEventCount": 0,
     }
     payload.update(overrides)
     return payload
@@ -165,3 +169,38 @@ def test_analysis_period_must_not_exceed_source_as_of():
         Exp3QuantityScopeManifest.model_validate(
             _manifest(analysisEndAt=datetime(2026, 12, 1, tzinfo=timezone.utc).isoformat())
         )
+
+
+def test_empty_scope_is_represented_without_zero_quantity_account_rows():
+    manifest = Exp3QuantityScopeManifest.model_validate(_manifest(
+        sourceVersion=None, sourceAsOf=None, ledgerCompleteSnapshot=False, quantityDataStatus="UNKNOWN",
+        cancellationHandling="UNKNOWN", duplicateHandling="UNKNOWN", duplicateSourceRowsRejected=False,
+        policyVerificationStatus="UNKNOWN", policySnapshotId=None, policyVersion=None,
+        policySourceVersion=None, confirmedPurchaseLimit=None, expectedAccountCount=0,
+        expectedActiveSourceRowCount=0, expectedTicketUnitRowCount=0, expectedOrderLineRowCount=0,
+        expectedOrderLineTicketQuantity=0, expectedActualTicketQuantity=0,
+        rebookingEvidenceStatus="UNKNOWN",
+    ))
+    validate_quantity_evidence_bundle([manifest], [])
+    assert not manifest.q_can_use_verified_policy
+
+
+def test_rebooking_event_requires_opaque_ticket_and_real_cancellation_time():
+    manifest = _manifest()
+    event = {
+        "recordType": "EXP3_REBOOKING_EVENT", "contractVersion": "exp3-quantity-evidence-v1",
+        "analysisId": manifest["analysisId"], "tenantId": manifest["tenantId"],
+        "supplierNamespace": manifest["supplierNamespace"], "eventId": manifest["eventId"],
+        "performanceId": manifest["performanceId"], "ledgerVersionId": manifest["ledgerVersionId"],
+        "hmacPurpose": "TRACK1_CONNECTION", "hmacKeyVersion": "key-v1",
+        "accountHmac": "b" * 64, "ticketHmac": "c" * 64, "sourceVersion": "source-v1",
+        "sourceAsOf": AS_OF, "analysisStartAt": START, "analysisEndAt": END,
+        "eventType": "RESERVATION", "eventAt": None,
+        "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+    }
+    parsed = Exp3RebookingEventRecord.model_validate(event)
+    assert parsed.event_at is None
+    with pytest.raises(ValidationError, match="rebooking_cancellation_time_required"):
+        Exp3RebookingEventRecord.model_validate({**event, "eventType": "CANCELLED"})
+    with pytest.raises(ValidationError, match="rebooking_event_time_outside_scope"):
+        Exp3RebookingEventRecord.model_validate({**event, "eventAt": "2026-10-31T23:59:59Z"})

@@ -20,7 +20,7 @@
   `accountCreatedAt`을 활성 ticket에 포함할 수 있다. 좌석 문자열은 1~64자이고 시각은 시간대가
   있는 ISO 8601 형식이어야 한다. 이 필드들은 현재 exp2 후보 연결과 점수 계산에 쓰지 않으며,
   기존 요청에서는 생략할 수 있다.
-- 취소 티켓은 `cancelledTickets` 또는 NDJSON v2의 `CANCELLED_TICKET` 레코드로 별도 전달한다.
+- 취소 티켓은 `cancelledTickets` 또는 NDJSON v2/v3의 `CANCELLED_TICKET` 레코드로 별도 전달한다.
   취소 레코드는 활성 ticket 행과 신호 입력에 합치지 않으며 exp2 구매 수량과 점수를 바꾸지 않는다.
 - 동일 예약 안에 여러 티켓 행이 있을 수 있으므로 Backend가 고정 scope별 `sourceRowOrdinal`을
   함께 보낸다. 이 값은 행 중복 검증에만 쓰며 계정 연결, 신호 또는 외부 식별자로 사용하지 않는다.
@@ -96,12 +96,17 @@ opaque 객체 이름이다.
 
 - `POST /api/v2/multi-event/jobs`는 `{manifest: ...}`와 `Idempotency-Key`를 받는다.
 - manifest는 artifact ID, object key/version, SHA-256, 400,000 이하 행 수, 입력 형식
-  `multi-event-exp2-ndjson-v1`, 분석 ID/tenant, 기간, score/projection 버전, supplier namespace,
+  `multi-event-exp2-ndjson-v1`, `multi-event-exp2-ndjson-v2` 또는 opt-in
+  `multi-event-exp3-evidence-ndjson-v1`, 분석 ID/tenant, 기간, score/projection 버전, supplier namespace,
   `TRACK1_CONNECTION` purpose, HMAC key version, 고정 `ledgerScopes`를 포함한다.
 - 각 `ledgerScopes` 원소는 표시용 `eventId`, digest 입력용 내부 UUID `sourceEventId`,
   `performanceId`, 고정 원장 버전, source batch와 선택적 정책 snapshot을 가진다. Data는
   Backend와 같은 Java UTF-16 길이 접두 방식으로 내부 event UUID, performance UUID, 원장
   version UUID의 canonical 집합 digest를 재계산한다.
+- NDJSON v1은 활성 ticket 행만 받는다. v2는 활성 ticket 행과 최소 하나의 별도
+  `CANCELLED_TICKET` 레코드를 받는다. `multi-event-exp3-evidence-ndjson-v1`은 main artifact의
+  기존 v1/v2 행 계약을 그대로 유지하면서 exp3 수량/E1 sidecar object reference만 추가한다.
+  sidecar를 켰다는 이유로 기존 취소 행 전송 설정이나 exp2 artifact 내용을 바꾸지 않는다.
 - 각 활성 NDJSON 행은 기존 `MultiEventTicketInput` 별칭과 위 선택 메타데이터를 지원하고 artifact
   전용으로 `sourceRowOrdinal`을 필수화한다. ordinal은 각 고정 원장 scope에서 유일해야 한다. 행의
   supplier, purpose, key version, event/performance/version은 manifest와 일치해야 한다.
@@ -131,6 +136,20 @@ opaque 객체 이름이다.
   단위다. 안전한 운영 계약은 공유 job DB를 사용하는 FastAPI process/replica 하나뿐이다.
   여러 worker/replica 동시 실행은 지원하지 않는다. 재시작 시 RUNNING 작업 복구는 단일
   서비스 프로세스 초기화 때 한 번 수행하고, 상태 조회 과정에서는 실행하지 않는다.
+- v3의 `exp3QuantityEvidenceArtifact`는 sidecar의 opaque object ID/key/version, SHA-256,
+  독립 record count와 `exp3-quantity-evidence-v1`을 고정한다. sidecar에는 회차별 수량 manifest,
+  가명 계정별 실제 수량, E1 예약/취소 이벤트가 들어간다. Data는 sidecar bytes, hash, count,
+  tenant/supplier/HMAC/time 범위, 모든 고정 회차의 존재, 계정별 합계, 중복 계정/티켓 이벤트를
+  확인하고 SQLite staging에 저장한다. 이 명시적 v3 경로의 완전하고 한도 검증된 실제 ACTIVE 수량은
+  두 개 이상 서로 다른 회차에서 계정별 한도에 도달했을 때 점수와 무관한 `HIGH_QUANTITY` 표시 근거로만
+  사용한다. 불완전한 scope, 실제 수량 또는 한도는 제외하고, Track2 좌석 겹침을 주장하지 않는다.
+  sidecar 기록은 exp2 숫자 점수, band, 순위에 사용하지 않는다. sidecar line 최대 크기는 1 MiB, 전체
+  크기는 기존 `MULTI_EVENT_ARTIFACT_MAX_BYTES`를 따른다. sidecar는 최대 1,200,500 records이며,
+  scope manifest 최대 500개와 실제 수량, 예약, 취소/환불 각 최대 400,000행으로 제한한다.
+- E1 예약 이벤트는 기간 안의 `reservedAt`으로 선택한다. `reservedAt`이 없으면 `purchasedAt`이
+  분석 기간 안인 행만 `eventAt=null`로 보존하고 해당 scope를 INCOMPLETE로 표시한다. `purchasedAt`을
+  이벤트 시각 대체값으로 보내지 않는다. 취소/환불 이벤트는 기간 안의 실제 `cancelledAt`과 원래
+  상태를 기록한다. E1 pair 선택은 이후 exp3 계산 단계가 수행한다.
 - 완료된 결과는 후보, 구성원, 관계 페이지 endpoint에서 숫자 offset cursor로 조회한다.
   각 페이지는 `cursor`, `nextCursor`, `totalCount`, `ledgerVersionSetDigest`, `records`를
   포함한다. page size는 1부터 500까지다. 완료 전에는 결과 조회를 차단한다.

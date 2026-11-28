@@ -106,3 +106,36 @@ def test_candidate_repeat_reason_is_omitted_when_no_member_repeats():
 
     assert candidate_reasons == []
     assert all(item["reasons"] == [] for item in member_rows)
+
+
+def test_high_quantity_reason_requires_two_verified_performances_and_has_no_peer_claim():
+    candidate_reasons, member_rows = build_evidence_reasons(
+        {"account-a", "account-b"},
+        {"performance-1", "performance-2"},
+        [],
+        high_quantity_performances={
+            "account-a": {"performance-1", "performance-2"},
+            "account-b": {"performance-1"},
+        },
+    )
+
+    assert candidate_reasons == [{
+        "code": "HIGH_QUANTITY", "count": 1,
+        "performances": ["performance-1", "performance-2"], "strengthRank": 1,
+    }]
+    assert member_rows[0] == {
+        "accountReferenceHmac": "account-a",
+        "reasons": [{"code": "HIGH_QUANTITY", "peerCount": 0,
+                     "performances": ["performance-1", "performance-2"]}],
+    }
+    assert member_rows[1]["reasons"] == []
+
+
+def test_high_quantity_reason_is_omitted_for_one_performance():
+    candidate_reasons, member_rows = build_evidence_reasons(
+        {"account-a"}, {"performance-1", "performance-2"}, [],
+        high_quantity_performances={"account-a": {"performance-1"}},
+    )
+
+    assert candidate_reasons == []
+    assert member_rows[0]["reasons"] == []

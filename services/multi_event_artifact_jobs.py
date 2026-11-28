@@ -41,6 +41,12 @@ from schemas.multi_event import (
     RETIRED_SCORE_VERSIONS,
     STORED_CONTEXT,
 )
+from schemas.exp3_quantity_evidence import (
+    Exp3AccountQuantityEvidence,
+    Exp3QuantityEvidenceArtifactRef,
+    Exp3QuantityScopeManifest,
+    Exp3RebookingEventRecord,
+)
 from services.multi_event_candidates import (
     STABLE_ACCOUNT_COCLUSTER,
     RecurrenceComparisonLimit,
@@ -227,6 +233,26 @@ class MultiEventArtifactJobRepository:
                   PRIMARY KEY(job_id,scope_id,account_id),
                   FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS mei_artifact_exp3_quantity_scopes (
+                  job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, manifest_json TEXT NOT NULL,
+                  PRIMARY KEY(job_id,scope_id),
+                  FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS mei_artifact_exp3_account_quantities (
+                  job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, account_hmac TEXT NOT NULL,
+                  active_source_row_count INTEGER NOT NULL, ticket_unit_row_count INTEGER NOT NULL,
+                  order_line_row_count INTEGER NOT NULL, order_line_ticket_quantity INTEGER NOT NULL,
+                  actual_ticket_quantity INTEGER NOT NULL, source_version TEXT NOT NULL, source_as_of TEXT NOT NULL,
+                  PRIMARY KEY(job_id,scope_id,account_hmac),
+                  FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS mei_artifact_exp3_rebooking_events (
+                  job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, event_type TEXT NOT NULL,
+                  ticket_hmac TEXT NOT NULL, account_hmac TEXT NOT NULL, source_version TEXT NOT NULL,
+                  source_as_of TEXT NOT NULL, event_at TEXT, seat_zone TEXT, seat_row TEXT, seat_number TEXT,
+                  PRIMARY KEY(job_id,scope_id,event_type,ticket_hmac),
+                  FOREIGN KEY(job_id,scope_id) REFERENCES mei_artifact_scopes(job_id,scope_id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS mei_artifact_excluded_tokens (
                   job_id TEXT NOT NULL, scope_id INTEGER NOT NULL, signal TEXT NOT NULL,
                   token TEXT NOT NULL, owner_count INTEGER NOT NULL, owner_digest TEXT NOT NULL,
@@ -405,7 +431,7 @@ class MultiEventArtifactJobRepository:
 
     def clear_stage(self, job_id: str) -> None:
         with _connect(self.path) as db:
-            for table in ("mei_artifact_candidate_cocluster", "mei_artifact_cocluster_members", "mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_member_reasons", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_cancelled_tickets", "mei_artifact_rows"):
+            for table in ("mei_artifact_candidate_cocluster", "mei_artifact_cocluster_members", "mei_artifact_candidate_evidence", "mei_artifact_candidate_scopes", "mei_artifact_candidate_member_reasons", "mei_artifact_candidate_members", "mei_artifact_relationships", "mei_artifact_candidates", "mei_artifact_evidence_members", "mei_artifact_evidence_groups", "mei_artifact_communities", "mei_artifact_quantity_contexts", "mei_artifact_exp3_rebooking_events", "mei_artifact_exp3_account_quantities", "mei_artifact_exp3_quantity_scopes", "mei_artifact_excluded_tokens", "mei_artifact_quantities", "mei_artifact_ip_types", "mei_artifact_token_owners", "mei_artifact_accounts", "mei_artifact_cancelled_tickets", "mei_artifact_rows"):
                 db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
             db.execute("UPDATE mei_artifact_jobs SET input_record_count=0,processed_record_count=0,candidate_count=0,supplier_namespace=NULL,hmac_key_version=NULL WHERE job_id=?", (job_id,))
 
@@ -458,6 +484,195 @@ class MultiEventArtifactJobRepository:
             db.execute("UPDATE mei_artifact_jobs SET input_record_count=?,processed_record_count=?,supplier_namespace=?,hmac_key_version=?,updated_at=? WHERE job_id=? AND status='RUNNING'",
                        (row_no, row_no, supplier_namespace, key_version, _now(), job_id))
 
+    def ingest_exp3_quantity_evidence(
+        self,
+        job_id: str,
+        chunks: Iterable[bytes],
+        manifest: MultiEventArtifactManifest,
+        artifact: Exp3QuantityEvidenceArtifactRef,
+    ) -> None:
+        """Stream, validate and stage the opt-in exp3 quantity/rebooking sidecar."""
+        digest, carry, row_no, byte_count = hashlib.sha256(), b"", 0, 0
+        scopes = {scope.key: index for index, scope in enumerate(manifest.ledger_scopes)}
+        quantity_manifests: dict[tuple[str, str, str, str, str, str], Exp3QuantityScopeManifest] = {}
+        quantity_sums: dict[tuple[str, str, str, str, str, str], list[int]] = {}
+        rebooking_counts: dict[tuple[str, str, str, str, str, str], list[int]] = {}
+        bundle_identity = None
+        with _connect(self.path) as db:
+            for chunk in chunks:
+                if not isinstance(chunk, bytes):
+                    raise InputRejected("EXP3_QUANTITY_CHUNK_INVALID")
+                byte_count += len(chunk)
+                if byte_count > self.max_artifact_bytes:
+                    raise InputRejected("EXP3_QUANTITY_ARTIFACT_TOO_LARGE")
+                digest.update(chunk)
+                carry += chunk
+                lines = carry.split(b"\n")
+                carry = lines.pop()
+                for line in lines:
+                    if len(line.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
+                        raise InputRejected("EXP3_QUANTITY_ROW_TOO_LARGE")
+                    row_no, bundle_identity = self._ingest_exp3_quantity_line(
+                        db, job_id, line.rstrip(b"\r"), row_no, manifest, artifact, scopes,
+                        quantity_manifests, quantity_sums, rebooking_counts, bundle_identity,
+                    )
+                    if row_no % 500 == 0:
+                        db.commit()
+                if len(carry) > MAX_NDJSON_LINE_BYTES:
+                    raise InputRejected("EXP3_QUANTITY_ROW_TOO_LARGE")
+            if carry:
+                if len(carry.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
+                    raise InputRejected("EXP3_QUANTITY_ROW_TOO_LARGE")
+                row_no, bundle_identity = self._ingest_exp3_quantity_line(
+                    db, job_id, carry.rstrip(b"\r"), row_no, manifest, artifact, scopes,
+                    quantity_manifests, quantity_sums, rebooking_counts, bundle_identity,
+                )
+            if digest.hexdigest() != artifact.sha256:
+                raise InputRejected("EXP3_QUANTITY_SHA256_MISMATCH")
+            if row_no != artifact.record_count:
+                raise InputRejected("EXP3_QUANTITY_RECORD_COUNT_MISMATCH")
+            if set(quantity_manifests) != set(self._exp3_scope_keys(manifest)):
+                raise InputRejected("EXP3_QUANTITY_SCOPE_COVERAGE_MISMATCH")
+            if bundle_identity is None:
+                raise InputRejected("EXP3_QUANTITY_MANIFEST_REQUIRED")
+            for scope_key, scope_manifest in quantity_manifests.items():
+                actual = quantity_sums.get(scope_key, [0, 0, 0, 0, 0, 0])
+                expected = [scope_manifest.expected_account_count, scope_manifest.expected_active_source_row_count,
+                            scope_manifest.expected_ticket_unit_row_count, scope_manifest.expected_order_line_row_count,
+                            scope_manifest.expected_order_line_ticket_quantity, scope_manifest.expected_actual_ticket_quantity]
+                if actual != expected:
+                    raise InputRejected("EXP3_QUANTITY_SCOPE_COVERAGE_MISMATCH")
+                events = rebooking_counts.get(scope_key, [0, 0, 0])
+                if events[:2] != [scope_manifest.expected_reservation_event_count, scope_manifest.expected_cancellation_event_count]:
+                    raise InputRejected("EXP3_REBOOKING_EVENT_COVERAGE_MISMATCH")
+                if events[2] > 0 and scope_manifest.rebooking_evidence_status == "COMPLETE":
+                    raise InputRejected("EXP3_REBOOKING_COMPLETENESS_MISMATCH")
+            if sum(values[1] for values in quantity_sums.values()) > 400_000:
+                raise InputRejected("EXP3_QUANTITY_SCOPE_LIMIT_EXCEEDED")
+            reservation_total = sum(values[0] for values in rebooking_counts.values())
+            cancellation_total = sum(values[1] for values in rebooking_counts.values())
+            if reservation_total > 400_000 or cancellation_total > 400_000:
+                raise InputRejected("EXP3_REBOOKING_EVENT_COUNT_EXCEEDED")
+
+    @staticmethod
+    def _exp3_scope_keys(manifest: MultiEventArtifactManifest):
+        for scope in manifest.ledger_scopes:
+            yield (manifest.analysis_id, manifest.tenant_id, manifest.supplier_namespace, scope.event_id,
+                   scope.performance_id, scope.ledger_version_id)
+
+    @staticmethod
+    def _ingest_exp3_quantity_line(
+        db, job_id, line, row_no, parent, artifact, scopes, quantity_manifests,
+        quantity_sums, rebooking_counts, bundle_identity,
+    ):
+        if not line:
+            raise InputRejected("EXP3_QUANTITY_ROW_MISSING")
+        try:
+            payload = json.loads(line)
+        except Exception as exc:
+            raise InputRejected("EXP3_QUANTITY_ROW_INVALID") from exc
+        record_type = payload.get("recordType") if isinstance(payload, dict) else None
+        if record_type == "EXP3_QUANTITY_SCOPE_MANIFEST":
+            try:
+                item = Exp3QuantityScopeManifest.model_validate(payload)
+            except Exception as exc:
+                raise InputRejected("EXP3_QUANTITY_SCOPE_MANIFEST_INVALID") from exc
+            scope_id = scopes.get((item.event_id, item.performance_id, item.ledger_version_id))
+            if scope_id is None:
+                raise InputRejected("EXP3_QUANTITY_SCOPE_MISMATCH")
+            fixed_scope = parent.ledger_scopes[scope_id]
+            if (item.analysis_id != parent.analysis_id or item.tenant_id != parent.tenant_id
+                    or item.supplier_namespace != parent.supplier_namespace or item.hmac_purpose != parent.hmac_purpose
+                    or item.hmac_key_version != parent.hmac_key_version or item.analysis_start_at != parent.analysis_start_at
+                    or item.analysis_end_at != parent.analysis_end_at or item.policy_snapshot_id != fixed_scope.policy_snapshot_id):
+                raise InputRejected("EXP3_QUANTITY_SCOPE_PROVENANCE_MISMATCH")
+            identity = (item.analysis_id, item.tenant_id, item.supplier_namespace, item.hmac_purpose,
+                        item.hmac_key_version, item.analysis_start_at, item.analysis_end_at)
+            if bundle_identity is not None and identity != bundle_identity:
+                raise InputRejected("EXP3_QUANTITY_BUNDLE_IDENTITY_MIXED")
+            bundle_identity = identity
+            if item.scope_key in quantity_manifests:
+                raise InputRejected("EXP3_QUANTITY_SCOPE_MANIFEST_DUPLICATE")
+            quantity_manifests[item.scope_key] = item
+            quantity_sums[item.scope_key] = [0, 0, 0, 0, 0, 0]
+            rebooking_counts[item.scope_key] = [0, 0, 0]
+            db.execute("INSERT INTO mei_artifact_exp3_quantity_scopes(job_id,scope_id,manifest_json) VALUES(?,?,?)",
+                       (job_id, scope_id, item.model_dump_json(by_alias=True)))
+        elif record_type == "EXP3_ACCOUNT_QUANTITY_EVIDENCE":
+            try:
+                item = Exp3AccountQuantityEvidence.model_validate(payload)
+            except Exception as exc:
+                raise InputRejected("EXP3_ACCOUNT_QUANTITY_EVIDENCE_INVALID") from exc
+            scope_manifest = quantity_manifests.get(item.scope_key)
+            if scope_manifest is None:
+                raise InputRejected("EXP3_QUANTITY_SCOPE_MANIFEST_REQUIRED")
+            if (item.source_version != scope_manifest.source_version or item.source_as_of != scope_manifest.source_as_of
+                    or item.hmac_purpose != scope_manifest.hmac_purpose
+                    or item.hmac_key_version != scope_manifest.hmac_key_version
+                    or item.analysis_start_at != scope_manifest.analysis_start_at
+                    or item.analysis_end_at != scope_manifest.analysis_end_at):
+                raise InputRejected("EXP3_QUANTITY_EVIDENCE_PROVENANCE_MISMATCH")
+            scope_id = scopes[(item.event_id, item.performance_id, item.ledger_version_id)]
+            try:
+                db.execute("""
+                    INSERT INTO mei_artifact_exp3_account_quantities(
+                      job_id,scope_id,account_hmac,active_source_row_count,ticket_unit_row_count,
+                      order_line_row_count,order_line_ticket_quantity,actual_ticket_quantity,source_version,source_as_of
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """, (job_id, scope_id, item.account_hmac, item.active_source_row_count,
+                          item.ticket_unit_row_count, item.order_line_row_count, item.order_line_ticket_quantity,
+                          item.actual_ticket_quantity, item.source_version, item.source_as_of.isoformat()))
+            except sqlite3.IntegrityError as exc:
+                raise InputRejected("EXP3_QUANTITY_ACCOUNT_DUPLICATE") from exc
+            sums = quantity_sums[item.scope_key]
+            sums[0] += 1
+            sums[1] += item.active_source_row_count
+            sums[2] += item.ticket_unit_row_count
+            sums[3] += item.order_line_row_count
+            sums[4] += item.order_line_ticket_quantity
+            sums[5] += item.actual_ticket_quantity
+        elif record_type == "EXP3_REBOOKING_EVENT":
+            try:
+                item = Exp3RebookingEventRecord.model_validate(payload)
+            except Exception as exc:
+                raise InputRejected("EXP3_REBOOKING_EVENT_INVALID") from exc
+            scope_manifest = quantity_manifests.get(item.scope_key)
+            if scope_manifest is None:
+                raise InputRejected("EXP3_QUANTITY_SCOPE_MANIFEST_REQUIRED")
+            if (scope_manifest.source_version is None or scope_manifest.source_as_of is None
+                    or item.source_version != scope_manifest.source_version or item.source_as_of != scope_manifest.source_as_of
+                    or item.hmac_purpose != scope_manifest.hmac_purpose
+                    or item.hmac_key_version != scope_manifest.hmac_key_version
+                    or item.analysis_start_at != scope_manifest.analysis_start_at
+                    or item.analysis_end_at != scope_manifest.analysis_end_at):
+                raise InputRejected("EXP3_REBOOKING_EVENT_PROVENANCE_MISMATCH")
+            scope_id = scopes[(item.event_id, item.performance_id, item.ledger_version_id)]
+            try:
+                db.execute("""
+                    INSERT INTO mei_artifact_exp3_rebooking_events(
+                      job_id,scope_id,event_type,ticket_hmac,account_hmac,source_version,source_as_of,
+                      event_at,seat_zone,seat_row,seat_number
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """, (job_id, scope_id, item.event_type, item.ticket_hmac, item.account_hmac,
+                          item.source_version, item.source_as_of.isoformat(),
+                          item.event_at.isoformat() if item.event_at is not None else None,
+                          item.seat_zone, item.seat_row, item.seat_number))
+            except sqlite3.IntegrityError as exc:
+                raise InputRejected("EXP3_REBOOKING_EVENT_DUPLICATE") from exc
+            counts = rebooking_counts[item.scope_key]
+            if item.event_type == "RESERVATION":
+                counts[0] += 1
+                if item.event_at is None:
+                    counts[2] += 1
+            else:
+                counts[1] += 1
+        else:
+            raise InputRejected("EXP3_QUANTITY_RECORD_TYPE_INVALID")
+        row_no += 1
+        if row_no > artifact.record_count:
+            raise InputRejected("EXP3_QUANTITY_RECORD_COUNT_EXCEEDED")
+        return row_no, bundle_identity
+
     @staticmethod
     def _ingest_line(db, job_id, line, row_no, manifest, scopes, supplier_namespace, key_version):
         if not line:
@@ -467,7 +682,9 @@ class MultiEventArtifactJobRepository:
         except Exception as exc:
             raise InputRejected("INPUT_ROW_INVALID") from exc
         if isinstance(payload, dict) and payload.get("recordType") == "CANCELLED_TICKET":
-            if manifest.input_format_version != "multi-event-exp2-ndjson-v2":
+            if manifest.input_format_version not in {
+                "multi-event-exp2-ndjson-v2", "multi-event-exp3-evidence-ndjson-v1"
+            }:
                 raise InputRejected("CANCELLED_TICKET_FORMAT_UNSUPPORTED")
             try:
                 record = MultiEventArtifactCancelledTicketRecord.model_validate(payload)
@@ -1151,6 +1368,29 @@ class MultiEventArtifactJobRepository:
         return result
 
     @staticmethod
+    def _candidate_high_quantity_performances(db, job_id: str, candidate_id: str) -> dict[str, set[str]]:
+        """Return complete, policy-verified active purchases that reached limit in each performance."""
+        rows = db.execute("""
+            SELECT q.account_hmac account_id,s.performance_id,q.actual_ticket_quantity,m.manifest_json
+            FROM mei_artifact_exp3_account_quantities q
+            JOIN mei_artifact_candidate_members cm
+              ON cm.job_id=q.job_id AND cm.account_id=q.account_hmac AND cm.candidate_id=?
+            JOIN mei_artifact_scopes s ON s.job_id=q.job_id AND s.scope_id=q.scope_id
+            JOIN mei_artifact_exp3_quantity_scopes m ON m.job_id=q.job_id AND m.scope_id=q.scope_id
+            WHERE q.job_id=?
+            ORDER BY q.account_hmac,s.performance_id,q.scope_id
+        """, (candidate_id, job_id))
+        result: dict[str, set[str]] = {}
+        for row in rows:
+            scope_manifest = Exp3QuantityScopeManifest.model_validate_json(row["manifest_json"])
+            limit = scope_manifest.confirmed_purchase_limit
+            if (not scope_manifest.q_can_use_verified_policy or limit is None
+                    or row["actual_ticket_quantity"] < limit):
+                continue
+            result.setdefault(row["account_id"], set()).add(row["performance_id"])
+        return {account: performances for account, performances in result.items() if len(performances) >= 2}
+
+    @staticmethod
     def _finalize_candidate(db, job_id, candidate_id, manifest, scope_by_id) -> int:
         member_count = db.execute("SELECT count(*) FROM mei_artifact_candidate_members WHERE job_id=? AND candidate_id=?", (job_id, candidate_id)).fetchone()[0]
         if member_count < 2 or member_count > MAX_CANDIDATE_MEMBERS:
@@ -1272,6 +1512,7 @@ class MultiEventArtifactJobRepository:
             (scope_by_id[index].performance_id for index in scope_ids),
             reason_groups,
             MultiEventArtifactJobRepository._candidate_member_performances(db, job_id, candidate_id),
+            MultiEventArtifactJobRepository._candidate_high_quantity_performances(db, job_id, candidate_id),
         )
         db.executemany(
             "INSERT OR REPLACE INTO mei_artifact_candidate_member_reasons(job_id,candidate_id,account_id,reasons_json) VALUES(?,?,?,?)",
@@ -1508,6 +1749,13 @@ class MultiEventArtifactJobService:
                 self.repository.ingest, job_id,
                 store.iter_bytes(manifest.object_key, manifest.object_version), manifest,
             )
+            if manifest.exp3_quantity_evidence_artifact is not None:
+                quantity_artifact = manifest.exp3_quantity_evidence_artifact
+                await asyncio.to_thread(
+                    self.repository.ingest_exp3_quantity_evidence, job_id,
+                    store.iter_bytes(quantity_artifact.object_key, quantity_artifact.object_version),
+                    manifest, quantity_artifact,
+                )
             algorithm = await graph_service.analyze_multi_event_artifact(self.repository, job_id, manifest)
             await asyncio.to_thread(self.repository.build_results, job_id, manifest, algorithm)
             self.repository.transition(job_id, "COMPLETED", algorithm=algorithm)

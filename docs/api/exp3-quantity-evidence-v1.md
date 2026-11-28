@@ -1,15 +1,18 @@
 # exp3 actual quantity evidence v1
 
-This contract is separate from the exp2 multi-event request. It does not enable an exp3 score. The schema and Backend DTO define the versioned boundary; the artifact producer/consumer wiring remains a prerequisite for a later, explicitly enabled exp3 analysis path.
+This contract is a separate, opt-in input sidecar for the existing multi-event artifact job. It does not change the exp2 request rows or scoring. The Backend registers an immutable object reference in `exp3QuantityEvidenceArtifact`; Data streams, hashes, validates and stores the sidecar before the existing exp2 analysis runs. The new input format is `multi-event-exp3-evidence-ndjson-v1` and is disabled by default in Backend.
 
 ## Scope and row model
 
-The NDJSON bundle uses two record types:
+The sidecar NDJSON bundle uses three record types:
 
 - `EXP3_QUANTITY_SCOPE_MANIFEST`: one record for each fixed tenant, supplier, event, performance, ledger version, analysis run, source version, and analysis time range.
 - `EXP3_ACCOUNT_QUANTITY_EVIDENCE`: one record per account HMAC with at least one effective ACTIVE ticket in that fixed scope and time range.
+- `EXP3_REBOOKING_EVENT`: one pseudonymous reservation, cancellation or refund event for E1. Reservation `eventAt` is copied only from `reservedAt`; when absent it remains null. `purchasedAt` is never substituted.
 
-The records contain no account reference, reservation reference, ticket reference, or original CSV value. `accountHmac` is the existing pseudonymous account identifier. Scope manifests bind tenant, supplier, event, performance, ledger version, HMAC purpose/key version, source version/as-of, and `[analysisStartAt, analysisEndAt)`.
+The records contain no account reference, reservation reference, ticket reference, or original CSV value. `accountHmac` and `ticketHmac` are existing purpose/key-versioned HMAC identifiers. Scope manifests bind tenant, supplier, event, performance, ledger version, HMAC purpose/key version, source version/as-of, and `[analysisStartAt, analysisEndAt)`. `ticketHmac` gives E1 a stable pseudonymous ticket identity for duplicate removal; it is not the reservation HMAC.
+
+The sidecar record ceiling is 1,200,500: up to 500 scope manifests and up to 400,000 each of account quantity, reservation, and cancellation/refund records. Each event category and all active source rows have a 400,000-row ceiling across the fixed analysis bundle.
 
 ## Quantity interpretation
 
@@ -21,13 +24,15 @@ Counts and totals are calculated after selecting the latest ledger revision for 
 - `activeSourceRowCount = ticketUnitRowCount + orderLineRowCount`;
 - `actualTicketQuantity = ticketUnitRowCount + orderLineTicketQuantity`.
 
-The scope manifest states the expected active account count, source row counts, and totals. A bundle contains one analysis, tenant, supplier, HMAC purpose/key version, and analysis time range; each event/performance appears once. Data must reject duplicate account-scope evidence, scope or provenance mismatches, cross-tenant/supplier bundles, and any bundle whose account rows do not add up to the manifest. The completeness flags also carry the ledger full-snapshot result, cancellation handling, duplicate handling, and the deterministic latest-revision rule. An incomplete source is not made complete by matching counts.
+The scope manifest states the expected active account count, source row counts, totals, E1 evidence status, and expected reservation/cancellation event counts. A bundle contains one analysis, tenant, supplier, HMAC purpose/key version, and analysis time range; each event/performance appears once. Data rejects duplicate account-scope evidence, duplicate ticket events, scope or provenance mismatches, cross-tenant/supplier bundles, and any bundle whose rows do not add up to the manifest. The completeness flags also carry the ledger full-snapshot result, cancellation handling, duplicate handling, and the deterministic latest-revision rule. An incomplete source is not made complete by matching counts. A scope with no active rows has zero counts and no account row; it cannot provide Q. If source version or source-as-of is unavailable, the scope is marked incomplete/unknown and Q remains neutral.
 
 ## Policy proof and Q
 
 `confirmedPurchaseLimit` is included only when the existing policy snapshot is verified for the same tenant, supplier, event, performance, ledger version, and source version. A confirmed policy requires its snapshot ID and version. `perAccountLimit` is not an actual purchase quantity.
 
 The later exp3 scorer may compute Q only from complete account/performance evidence with a confirmed matching policy. If a required active pair, source quantity, completeness proof, or policy limit is missing or conflicts, use the preregistered neutral `Q=0.5`; do not average only the known subset. Cancellation-only accounts are not inserted as zero-quantity rows. A high Q without an actual shared E2 resource does not create a candidate edge.
+
+The E1 sidecar preserves event inputs for the preregistered 90-second rule. Active quantity rows are selected by `purchasedAt`; E1 reservation rows use `reservedAt` in [analysisStartAt, analysisEndAt). If `reservedAt` is missing, a row is retained only when its `purchasedAt` is in that period, its `eventAt` stays null, and the scope is marked INCOMPLETE. `purchasedAt` is never used as an event time. Cancellation/refund rows use their actual `cancelledAt` in the period. Data does not choose cancellation/reservation pairs during ingestion. It stores the original event direction, event time, seat strings, account HMAC and ticket HMAC so the exp3 scorer can deterministically select one-to-one relations. Cancelled/refunded events are never converted into active quantity.
 
 ## Example
 
@@ -40,8 +45,8 @@ The values are synthetic. The record is illustrative and is not a statement that
 
 ## HIGH_QUANTITY
 
-The approved product text is “계정당 최대 수량을 반복해서 샀습니다” and the specified corroborating evidence is an overlapping Track2 resale listing. The current specification does not define how many maximum-quantity purchases count as repeated, the observation window, whether repeat purchases must be on distinct performances, or when a listing overlap is strong enough to display. This contract therefore supplies evidence fields but does not define or emit a `HIGH_QUANTITY` finding. Do not substitute Q, the purchase limit itself, or an unavailable listing as that finding.
+The approved product text is “계정당 최대 수량을 반복해서 샀습니다”. On this explicit sidecar path, emit the reason only when the same account reaches a confirmed per-account limit through actual ACTIVE purchases in at least two distinct performances in the selected analysis period. Each counted performance must have a complete ledger, quantity, and limit provenance. Exclude incomplete scope, quantity/limit provenance, and cancelled or refunded rows. This reason does not change the score, band, or rank. Track2 seat overlap is not required; do not display overlap unless it has actually been verified. Q, the configured limit by itself, and missing listings are not proof of this reason.
 
 ## Activation boundary
 
-The current exp2 request, result, quantity calculation, and 11 regression oracles remain unchanged. This contract must be carried only by an explicitly versioned exp3 input path and remain disabled until Gate B is approved and the later exp3 implementation selects it. This initial contract commit validates the schema and bundle totals; it does not yet add the NDJSON upload route, Backend row aggregation, or score consumption.
+The current exp2 request, result, quantity calculation, and 11 regression oracles remain unchanged. This sidecar is carried only by the explicitly versioned exp3 input path. Data validates and stores it but does not consume it for scoring; exp3 scoring remains disabled until Gate B approval and the PR 4 implementation.

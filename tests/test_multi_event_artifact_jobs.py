@@ -586,15 +586,23 @@ def test_cancelled_artifact_requires_v2_and_matching_count(tmp_path):
         v1_repository.ingest(v1_job.job_id, [raw], v1_manifest)
     assert error.value.code == "CANCELLED_TICKET_FORMAT_UNSUPPORTED"
 
-    payload = _manifest_payload(scopes, raw, 2)
+    second_cancelled = {
+        "recordType": "CANCELLED_TICKET",
+        "cancelledTicket": {
+            **cancelled["cancelledTicket"],
+            "ticketHmac": _hash("d"), "sourceRowOrdinal": 3,
+        },
+    }
+    mismatched_raw, _ = _artifact(scopes, [rows[0], cancelled, second_cancelled])
+    payload = _manifest_payload(scopes, mismatched_raw, 3)
     payload["inputFormatVersion"] = "multi-event-exp2-ndjson-v2"
-    payload["cancelledTicketRecordCount"] = 0
+    payload["cancelledTicketRecordCount"] = 1
     mismatch_manifest = MultiEventArtifactManifest.model_validate(payload)
     mismatch_repository = MultiEventArtifactJobRepository(tmp_path / "cancelled-count.sqlite")
     mismatch_job = mismatch_repository.create("cancelled-count", mismatch_manifest)
     assert mismatch_repository.start(mismatch_job.job_id)
     with pytest.raises(InputRejected) as error:
-        mismatch_repository.ingest(mismatch_job.job_id, [raw], mismatch_manifest)
+        mismatch_repository.ingest(mismatch_job.job_id, [mismatched_raw], mismatch_manifest)
     assert error.value.code == "CANCELLED_TICKET_RECORD_COUNT_MISMATCH"
 
 

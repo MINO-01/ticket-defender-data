@@ -97,6 +97,63 @@ def _artifact(scopes, rows):
     return raw, MultiEventArtifactManifest.model_validate(_manifest_payload(scopes, raw, len(rows)))
 
 
+def _exp3_quantity_sidecar(manifest, verified_limit=False, incomplete_scope_ids=()):
+    lines = []
+    for scope in manifest.ledger_scopes:
+        identity = {
+            "analysisId": manifest.analysis_id, "tenantId": manifest.tenant_id,
+            "supplierNamespace": manifest.supplier_namespace, "eventId": scope.event_id,
+            "performanceId": scope.performance_id, "ledgerVersionId": scope.ledger_version_id,
+        }
+        lines.append({
+            "recordType": "EXP3_QUANTITY_SCOPE_MANIFEST", "contractVersion": "exp3-quantity-evidence-v1",
+            **identity, "hmacPurpose": manifest.hmac_purpose, "hmacKeyVersion": manifest.hmac_key_version,
+            "sourceVersion": "source-v1", "sourceAsOf": manifest.analysis_as_of.isoformat(),
+            "analysisStartAt": manifest.analysis_start_at.isoformat(), "analysisEndAt": manifest.analysis_end_at.isoformat(),
+            "ledgerCompleteSnapshot": True,
+            "quantityDataStatus": "INCOMPLETE" if scope.event_id in incomplete_scope_ids else "COMPLETE",
+            "cancellationHandling": "NETTED",
+            "duplicateHandling": "DEDUPLICATED", "duplicateSelection": "LATEST_REVISION_PER_TICKET_REFERENCE",
+            "duplicateSourceRowsRejected": True,
+            "policyVerificationStatus": "CONFIRMED" if verified_limit else "NOT_CONFIRMED",
+            "policySnapshotId": scope.policy_snapshot_id,
+            "policyVersion": "policy-v1" if verified_limit else None,
+            "policySourceVersion": "source-v1" if verified_limit else None,
+            "confirmedPurchaseLimit": 1 if verified_limit else None,
+            "expectedAccountCount": 1, "expectedActiveSourceRowCount": 1,
+            "expectedTicketUnitRowCount": 1, "expectedOrderLineRowCount": 0,
+            "expectedOrderLineTicketQuantity": 0, "expectedActualTicketQuantity": 1,
+            "rebookingEvidenceStatus": "INCOMPLETE", "expectedReservationEventCount": 1,
+            "expectedCancellationEventCount": 0,
+        })
+        lines.append({
+            "recordType": "EXP3_ACCOUNT_QUANTITY_EVIDENCE", "contractVersion": "exp3-quantity-evidence-v1",
+            **identity, "hmacPurpose": manifest.hmac_purpose, "hmacKeyVersion": manifest.hmac_key_version,
+            "accountHmac": _hash("a"), "sourceVersion": "source-v1", "sourceAsOf": manifest.analysis_as_of.isoformat(),
+            "analysisStartAt": manifest.analysis_start_at.isoformat(), "analysisEndAt": manifest.analysis_end_at.isoformat(),
+            "activeSourceRowCount": 1, "ticketUnitRowCount": 1, "orderLineRowCount": 0,
+            "orderLineTicketQuantity": 0, "actualTicketQuantity": 1,
+        })
+        lines.append({
+            "recordType": "EXP3_REBOOKING_EVENT", "contractVersion": "exp3-quantity-evidence-v1",
+            **identity, "hmacPurpose": manifest.hmac_purpose, "hmacKeyVersion": manifest.hmac_key_version,
+            "accountHmac": _hash("a"), "ticketHmac": _hash("b"), "sourceVersion": "source-v1",
+            "sourceAsOf": manifest.analysis_as_of.isoformat(),
+            "analysisStartAt": manifest.analysis_start_at.isoformat(),
+            "analysisEndAt": manifest.analysis_end_at.isoformat(), "eventType": "RESERVATION",
+            "eventAt": None, "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+        })
+    raw = b"".join(json.dumps(line, separators=(",", ":")).encode() + b"\n" for line in lines)
+    parent = manifest.model_dump(by_alias=True, mode="json")
+    parent["inputFormatVersion"] = "multi-event-exp3-evidence-ndjson-v1"
+    parent["exp3QuantityEvidenceArtifact"] = {
+        "contractVersion": "exp3-quantity-evidence-v1", "artifactId": "opaque-exp3-sidecar",
+        "objectKey": "opaque-exp3-sidecar", "objectVersion": "exp3-version-1",
+        "sha256": hashlib.sha256(raw).hexdigest(), "recordCount": len(lines),
+    }
+    return raw, MultiEventArtifactManifest.model_validate(parent)
+
+
 def test_small_json_contract_does_not_require_internal_source_event_id():
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     scopes = [{
@@ -281,6 +338,160 @@ def test_cancelled_artifact_records_are_separate_from_exp2_rows(tmp_path):
     )
 
 
+def test_exp3_quantity_and_rebooking_sidecar_is_hash_scope_and_coverage_validated(tmp_path):
+    scopes = _scopes()
+    raw, exp2_manifest = _artifact(scopes, [_ticket(scopes[0], "a", 1, 1), _ticket(scopes[1], "a", 2, 1)])
+    sidecar, manifest = _exp3_quantity_sidecar(exp2_manifest)
+    repository = MultiEventArtifactJobRepository(tmp_path / "exp3-sidecar.sqlite")
+    accepted = repository.create("exp3-sidecar", manifest)
+    assert repository.start(accepted.job_id)
+    repository.ingest(accepted.job_id, [raw], manifest)
+    repository.ingest_exp3_quantity_evidence(
+        accepted.job_id, [sidecar], manifest, manifest.exp3_quantity_evidence_artifact,
+    )
+
+    db = sqlite3.connect(repository.path)
+    try:
+        assert db.execute("SELECT count(*) FROM mei_artifact_exp3_quantity_scopes WHERE job_id=?", (accepted.job_id,)).fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM mei_artifact_exp3_account_quantities WHERE job_id=?", (accepted.job_id,)).fetchone()[0] == 2
+        events = db.execute("""
+            SELECT event_type,ticket_hmac,event_at,seat_zone,seat_row,seat_number
+            FROM mei_artifact_exp3_rebooking_events WHERE job_id=? ORDER BY scope_id
+            """, (accepted.job_id,)).fetchall()
+    finally:
+        db.close()
+    assert events == [("RESERVATION", _hash("b"), None, "BALCONY", "R1", "12")] * 2
+
+
+def test_exp3_complete_rebooking_scope_rejects_reservation_without_reserved_at(tmp_path):
+    scopes = _scopes()
+    raw, exp2_manifest = _artifact(scopes, [_ticket(scopes[0], "a", 1, 1), _ticket(scopes[1], "a", 2, 1)])
+    sidecar, manifest = _exp3_quantity_sidecar(exp2_manifest)
+    records = [json.loads(line) for line in sidecar.splitlines()]
+    next(item for item in records if item["recordType"] == "EXP3_QUANTITY_SCOPE_MANIFEST")["rebookingEvidenceStatus"] = "COMPLETE"
+    sidecar = b"".join(json.dumps(item, separators=(",", ":")).encode() + b"\n" for item in records)
+    payload = manifest.model_dump(by_alias=True, mode="json")
+    payload["exp3QuantityEvidenceArtifact"]["sha256"] = hashlib.sha256(sidecar).hexdigest()
+    manifest = MultiEventArtifactManifest.model_validate(payload)
+    repository = MultiEventArtifactJobRepository(tmp_path / "exp3-missing-reserved-at.sqlite")
+    accepted = repository.create("exp3-missing-reserved-at", manifest)
+    assert repository.start(accepted.job_id)
+    repository.ingest(accepted.job_id, [raw], manifest)
+    with pytest.raises(InputRejected) as error:
+        repository.ingest_exp3_quantity_evidence(
+            accepted.job_id, [sidecar], manifest, manifest.exp3_quantity_evidence_artifact,
+        )
+    assert error.value.code == "EXP3_REBOOKING_COMPLETENESS_MISMATCH"
+
+
+def test_exp3_quantity_sidecar_rejects_tenant_mismatch(tmp_path):
+    scopes = _scopes()
+    raw, exp2_manifest = _artifact(scopes, [_ticket(scopes[0], "a", 1, 1), _ticket(scopes[1], "a", 2, 1)])
+    sidecar, manifest = _exp3_quantity_sidecar(exp2_manifest)
+    records = [json.loads(line) for line in sidecar.splitlines()]
+    evidence = next(item for item in records if item["recordType"] == "EXP3_ACCOUNT_QUANTITY_EVIDENCE")
+    evidence["tenantId"] = str(uuid4())
+    sidecar = b"".join(json.dumps(item, separators=(",", ":")).encode() + b"\n" for item in records)
+    payload = manifest.model_dump(by_alias=True, mode="json")
+    payload["exp3QuantityEvidenceArtifact"]["sha256"] = hashlib.sha256(sidecar).hexdigest()
+    manifest = MultiEventArtifactManifest.model_validate(payload)
+    repository = MultiEventArtifactJobRepository(tmp_path / "exp3-mismatch.sqlite")
+    accepted = repository.create("exp3-mismatch", manifest)
+    assert repository.start(accepted.job_id)
+    repository.ingest(accepted.job_id, [raw], manifest)
+    with pytest.raises(InputRejected) as error:
+        repository.ingest_exp3_quantity_evidence(
+            accepted.job_id, [sidecar], manifest, manifest.exp3_quantity_evidence_artifact,
+        )
+    assert error.value.code == "EXP3_QUANTITY_SCOPE_MANIFEST_REQUIRED"
+
+
+def test_high_quantity_reason_uses_only_complete_verified_active_quantities(tmp_path):
+    scopes = _scopes()
+    for scope in scopes:
+        scope["policySnapshotId"] = str(uuid4())
+    raw, exp2_manifest = _artifact(scopes, [
+        _ticket(scopes[0], "a", 1, 1), _ticket(scopes[1], "a", 2, 1),
+    ])
+    sidecar, manifest = _exp3_quantity_sidecar(exp2_manifest, verified_limit=True)
+    repository = MultiEventArtifactJobRepository(tmp_path / "high-quantity.sqlite")
+    accepted = repository.create("high-quantity", manifest)
+    assert repository.start(accepted.job_id)
+    repository.ingest(accepted.job_id, [raw], manifest)
+    repository.ingest_exp3_quantity_evidence(
+        accepted.job_id, [sidecar], manifest, manifest.exp3_quantity_evidence_artifact,
+    )
+
+    account = _hash("a")
+    candidate_id = "candidate-high-quantity"
+    with sqlite3.connect(repository.path) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("""
+            INSERT INTO mei_artifact_candidates(
+              job_id,candidate_id,priority_band,score,distinct_account_count,
+              distinct_event_count,distinct_performance_count,verified_relationship_count,summary_json
+            ) VALUES(?,?,'LOW',0.25,2,2,2,2,'{}')
+        """, (accepted.job_id, candidate_id))
+        db.executemany(
+            "INSERT INTO mei_artifact_candidate_members(job_id,candidate_id,account_id) VALUES(?,?,?)",
+            [(accepted.job_id, candidate_id, account), (accepted.job_id, candidate_id, _hash("c"))],
+        )
+        performances = repository._candidate_high_quantity_performances(db, accepted.job_id, candidate_id)
+    assert performances[account] == {scope.performance_id for scope in manifest.ledger_scopes}
+
+    incomplete, incomplete_manifest = _exp3_quantity_sidecar(
+        exp2_manifest, verified_limit=True, incomplete_scope_ids={manifest.ledger_scopes[0].event_id},
+    )
+    other = MultiEventArtifactJobRepository(tmp_path / "high-quantity-incomplete.sqlite")
+    other_accepted = other.create("high-quantity-incomplete", incomplete_manifest)
+    assert other.start(other_accepted.job_id)
+    other.ingest(other_accepted.job_id, [raw], incomplete_manifest)
+    other.ingest_exp3_quantity_evidence(
+        other_accepted.job_id, [incomplete], incomplete_manifest,
+        incomplete_manifest.exp3_quantity_evidence_artifact,
+    )
+    with sqlite3.connect(other.path) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("""
+            INSERT INTO mei_artifact_candidates(
+              job_id,candidate_id,priority_band,score,distinct_account_count,
+              distinct_event_count,distinct_performance_count,verified_relationship_count,summary_json
+            ) VALUES(?,?,'LOW',0.25,2,2,2,2,'{}')
+        """, (other_accepted.job_id, candidate_id))
+        db.executemany(
+            "INSERT INTO mei_artifact_candidate_members(job_id,candidate_id,account_id) VALUES(?,?,?)",
+            [(other_accepted.job_id, candidate_id, account), (other_accepted.job_id, candidate_id, _hash("c"))],
+        )
+        performances = other._candidate_high_quantity_performances(db, other_accepted.job_id, candidate_id)
+    assert performances == {}
+
+
+def test_async_worker_fetches_and_validates_opt_in_exp3_sidecar_before_analysis(tmp_path, monkeypatch):
+    scopes = _scopes()
+    main_raw, exp2_manifest = _artifact(scopes, [_ticket(scopes[0], "a", 1, 1), _ticket(scopes[1], "a", 2, 1)])
+    sidecar, manifest = _exp3_quantity_sidecar(exp2_manifest)
+
+    class SidecarStore:
+        def iter_bytes(self, object_key, version):
+            objects = {
+                ("opaque-artifact-object", "version-1"): main_raw,
+                ("opaque-exp3-sidecar", "exp3-version-1"): sidecar,
+            }
+            assert (object_key, version) in objects
+            return iter([objects[(object_key, version)]])
+
+    repository = MultiEventArtifactJobRepository(tmp_path / "exp3-worker.sqlite")
+    service = MultiEventArtifactJobService(repository, SidecarStore(), lambda: _Graph())
+    monkeypatch.setattr(artifact_jobs.asyncio, "to_thread", _inline_to_thread)
+    accepted = repository.create("exp3-worker", manifest)
+    _run_immediate(service._run(accepted.job_id))
+    assert repository.status(accepted.job_id).status == "COMPLETED"
+    with sqlite3.connect(repository.path) as db:
+        assert db.execute("SELECT count(*) FROM mei_artifact_exp3_account_quantities WHERE job_id=?", (accepted.job_id,)).fetchone()[0] == 2
+
+
 def test_clear_stage_removes_cancelled_tickets_and_candidate_member_reasons(tmp_path):
     scopes = _scopes()
     active = _ticket(scopes[0], "a", 1, 1)
@@ -375,15 +586,23 @@ def test_cancelled_artifact_requires_v2_and_matching_count(tmp_path):
         v1_repository.ingest(v1_job.job_id, [raw], v1_manifest)
     assert error.value.code == "CANCELLED_TICKET_FORMAT_UNSUPPORTED"
 
-    payload = _manifest_payload(scopes, raw, 2)
+    second_cancelled = {
+        "recordType": "CANCELLED_TICKET",
+        "cancelledTicket": {
+            **cancelled["cancelledTicket"],
+            "ticketHmac": _hash("d"), "sourceRowOrdinal": 3,
+        },
+    }
+    mismatched_raw, _ = _artifact(scopes, [rows[0], cancelled, second_cancelled])
+    payload = _manifest_payload(scopes, mismatched_raw, 3)
     payload["inputFormatVersion"] = "multi-event-exp2-ndjson-v2"
-    payload["cancelledTicketRecordCount"] = 0
+    payload["cancelledTicketRecordCount"] = 1
     mismatch_manifest = MultiEventArtifactManifest.model_validate(payload)
     mismatch_repository = MultiEventArtifactJobRepository(tmp_path / "cancelled-count.sqlite")
     mismatch_job = mismatch_repository.create("cancelled-count", mismatch_manifest)
     assert mismatch_repository.start(mismatch_job.job_id)
     with pytest.raises(InputRejected) as error:
-        mismatch_repository.ingest(mismatch_job.job_id, [raw], mismatch_manifest)
+        mismatch_repository.ingest(mismatch_job.job_id, [mismatched_raw], mismatch_manifest)
     assert error.value.code == "CANCELLED_TICKET_RECORD_COUNT_MISMATCH"
 
 

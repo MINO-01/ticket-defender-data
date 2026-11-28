@@ -15,6 +15,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from schemas.dto import BulkId, HashToken, IpNetworkType, UUIDText
+from schemas.exp3_quantity_evidence import Exp3QuantityEvidenceArtifactRef
 
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=128)]
@@ -258,7 +259,9 @@ class MultiEventArtifactManifest(BaseModel):
     sha256: HashToken
     record_count: StrictInt = Field(alias="recordCount", ge=1, le=400_000)
     cancelled_ticket_record_count: StrictInt = Field(default=0, alias="cancelledTicketRecordCount", ge=0, le=399_999)
-    input_format_version: Literal["multi-event-exp2-ndjson-v1", "multi-event-exp2-ndjson-v2"] = Field(alias="inputFormatVersion")
+    input_format_version: Literal[
+        "multi-event-exp2-ndjson-v1", "multi-event-exp2-ndjson-v2", "multi-event-exp3-evidence-ndjson-v1"
+    ] = Field(alias="inputFormatVersion")
     analysis_id: UUIDText = Field(alias="analysisId")
     tenant_id: UUIDText = Field(alias="tenantId")
     ledger_version_set_digest: HashToken = Field(alias="ledgerVersionSetDigest")
@@ -271,6 +274,9 @@ class MultiEventArtifactManifest(BaseModel):
     hmac_purpose: Literal["TRACK1_CONNECTION"] = Field(alias="hmacPurpose")
     hmac_key_version: ShortText = Field(alias="hmacKeyVersion")
     ledger_scopes: list[MultiEventArtifactLedgerScope] = Field(alias="ledgerScopes", min_length=2, max_length=500)
+    exp3_quantity_evidence_artifact: Exp3QuantityEvidenceArtifactRef | None = Field(
+        default=None, alias="exp3QuantityEvidenceArtifact"
+    )
 
     @model_validator(mode="after")
     def validate_manifest(self, info: ValidationInfo):
@@ -283,6 +289,13 @@ class MultiEventArtifactManifest(BaseModel):
             raise PydanticCustomError("INVALID_ARTIFACT_REFERENCE", "objectKey must be an opaque object name")
         if self.analysis_end_at <= self.analysis_start_at or self.analysis_end_at > self.analysis_as_of:
             raise PydanticCustomError("invalid_analysis_period", "Analysis period must be ordered and not after analysisAsOf")
+        if self.input_format_version == "multi-event-exp2-ndjson-v1" and self.cancelled_ticket_record_count != 0:
+            raise PydanticCustomError("INVALID_CANCELLED_TICKET_FORMAT", "cancelled ticket rows require NDJSON v2 or later")
+        if self.input_format_version == "multi-event-exp2-ndjson-v2" and self.cancelled_ticket_record_count == 0:
+            raise PydanticCustomError("INVALID_CANCELLED_TICKET_FORMAT", "NDJSON v2 requires at least one cancelled ticket row")
+        if ((self.input_format_version == "multi-event-exp3-evidence-ndjson-v1")
+                != (self.exp3_quantity_evidence_artifact is not None)):
+            raise PydanticCustomError("INVALID_EXP3_QUANTITY_SIDECAR_BINDING", "exp3 evidence input requires its separate quantity evidence sidecar")
         scope_keys = [scope.key for scope in self.ledger_scopes]
         if len(scope_keys) != len(set(scope_keys)):
             raise PydanticCustomError("duplicate_ledger_scope", "Ledger scopes must be unique")

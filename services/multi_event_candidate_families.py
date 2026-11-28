@@ -27,6 +27,7 @@ def build_evidence_reasons(
     candidate_performances: Iterable[str],
     shared_groups: Iterable[tuple[str, str, set[str]]],
     member_performances: dict[str, set[str]] | None = None,
+    high_quantity_performances: dict[str, set[str]] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Summarize qualifying shared-token groups without retaining token values.
 
@@ -35,10 +36,9 @@ def build_evidence_reasons(
     number of other members in one qualifying token group for that reason.
     Strength rank orders by count, then performance coverage, then code.
 
-    HIGH_QUANTITY remains in the response schema's reason vocabulary but is
-    intentionally not emitted here: this candidate artifact does not yet join
-    per-account supplier-seat quantities to verified Track 2 resale-seat
-    overlap. The score's quantity component alone is not sufficient evidence.
+    HIGH_QUANTITY is emitted only when the caller supplies verified active
+    purchase observations for at least two distinct performances. This display
+    reason does not depend on Track 2 resale-seat overlap and never changes score.
     """
     members = sorted(set(account_ids))
     metrics: dict[str, dict] = {}
@@ -76,6 +76,21 @@ def build_evidence_reasons(
         metrics["REPEATED_PERFORMANCES"] = {
             "accounts": set(repeated_members),
             "performances": set().union(*repeated_members.values()),
+        }
+
+    high_quantity_members: dict[str, set[str]] = {}
+    for account in members:
+        performances = set((high_quantity_performances or {}).get(account, set()))
+        if len(performances) >= 2:
+            high_quantity_members[account] = performances
+            member_metrics[account]["HIGH_QUANTITY"] = {
+                "peer_count": 0,
+                "performances": performances,
+            }
+    if high_quantity_members:
+        metrics["HIGH_QUANTITY"] = {
+            "accounts": set(high_quantity_members),
+            "performances": set().union(*high_quantity_members.values()),
         }
 
     ordered = sorted(metrics.items(), key=lambda item: (

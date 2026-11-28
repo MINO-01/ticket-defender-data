@@ -25,7 +25,8 @@ from schemas.dto import (
     Track1BulkClusterMemberPage, Track1BulkJobResults, Track1BulkJobStatus,
     Track1BulkPurchaseLimitEvaluationPage, Track1BulkPurchaseLimitEvaluationSummary,
     Track1BulkPurchaseLimitFindingPage, Track1BulkSharedSignalObservationPage,
-    Track1AccountLimitFinding, Track1LimitTicketInput,
+    Track1AccountLimitFinding, Track1LimitTicketInput, Track1CancelledTicketInput,
+    Track1BulkCancelledTicketRecord,
     Track1ReservationQuantity, Track1SharedSignalCorroboration, Track1SharedSignalObservation,
 )
 from services.track1_scoring import DEFAULT_PARAMETERS, SIGNALS, hub_minimum_accounts, is_hub, score_v2
@@ -137,6 +138,14 @@ class BulkJobRepository:
                   account_id TEXT NOT NULL, reservation_no TEXT NOT NULL, ticket_reference TEXT,
                   row_json TEXT NOT NULL, PRIMARY KEY(job_id, row_no),
                   UNIQUE(job_id, scope, account_id, reservation_no, ticket_reference),
+                  FOREIGN KEY(job_id) REFERENCES bulk_jobs(job_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS bulk_cancelled_input_rows (
+                  job_id TEXT NOT NULL, row_no INTEGER NOT NULL, scope TEXT NOT NULL,
+                  account_hmac TEXT NOT NULL, ticket_hmac TEXT NOT NULL,
+                  seat_zone TEXT, seat_row TEXT, seat_number TEXT, cancelled_at TEXT NOT NULL,
+                  PRIMARY KEY(job_id, row_no),
+                  UNIQUE(job_id, scope, account_hmac, ticket_hmac),
                   FOREIGN KEY(job_id) REFERENCES bulk_jobs(job_id) ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS bulk_accounts (
@@ -275,6 +284,7 @@ class BulkJobRepository:
                 "bulk_purchase_limit_reservations", "bulk_purchase_limit_findings", "bulk_purchase_limit_evaluations",
                 "bulk_shared_signal_observations", "bulk_aux_results", "bulk_clusters", "bulk_communities",
                 "bulk_token_owners", "bulk_accounts", "bulk_input_rows",
+                "bulk_cancelled_input_rows",
             ):
                 db.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
         return Track1BulkJobAccepted(jobId=job_id, status="QUEUED")
@@ -285,7 +295,7 @@ class BulkJobRepository:
         return bool(row and row[0])
 
     def ingest(self, job_id: str, chunks: Iterable[bytes], manifest: Track1BulkArtifactManifest) -> None:
-        digest, carry, row_no = hashlib.sha256(), b"", 0
+        digest, carry, row_no, cancelled_count = hashlib.sha256(), b"", 0, 0
         scopes = {scope.performance_id.lower(): scope for scope in manifest.performance_scopes}
         with _connect(self.path) as db:
             for chunk in chunks:
@@ -296,7 +306,8 @@ class BulkJobRepository:
                 for line in lines:
                     if len(line.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
                         raise InputRejected("INPUT_ROW_TOO_LARGE")
-                    row_no = self._ingest_line(db, job_id, line.rstrip(b"\r"), row_no, manifest, scopes)
+                    row_no, cancelled = self._ingest_line(db, job_id, line.rstrip(b"\r"), row_no, manifest, scopes)
+                    cancelled_count += int(cancelled)
                     if row_no % 500 == 0:
                         db.commit()
                         if self.cancelled(job_id):
@@ -309,21 +320,55 @@ class BulkJobRepository:
             if carry:
                 if len(carry.rstrip(b"\r")) > MAX_NDJSON_LINE_BYTES:
                     raise InputRejected("INPUT_ROW_TOO_LARGE")
-                row_no = self._ingest_line(db, job_id, carry.rstrip(b"\r"), row_no, manifest, scopes)
+                row_no, cancelled = self._ingest_line(db, job_id, carry.rstrip(b"\r"), row_no, manifest, scopes)
+                cancelled_count += int(cancelled)
             if digest.hexdigest() != manifest.sha256:
                 raise InputRejected("SHA256_MISMATCH")
             if row_no != manifest.record_count:
                 raise InputRejected("RECORD_COUNT_MISMATCH")
+            if cancelled_count != manifest.cancelled_ticket_record_count:
+                raise InputRejected("CANCELLED_TICKET_RECORD_COUNT_MISMATCH")
             db.execute("UPDATE bulk_jobs SET input_record_count=?, processed_record_count=?, updated_at=? WHERE job_id=?", (row_no, row_no, _now(), job_id))
 
     @staticmethod
-    def _ingest_line(db, job_id, line, row_no, manifest, scopes) -> int:
+    def _ingest_line(db, job_id, line, row_no, manifest, scopes) -> tuple[int, bool]:
         if not line:
             raise InputRejected("INPUT_ROW_MISSING")
         try:
-            ticket = Track1LimitTicketInput.model_validate(json.loads(line))
+            payload = json.loads(line)
         except Exception as exc:
             raise InputRejected("INPUT_ROW_INVALID") from exc
+        if isinstance(payload, dict) and payload.get("recordType") == "CANCELLED_TICKET":
+            if manifest.input_format_version != "track1-limit-ndjson-v2":
+                raise InputRejected("CANCELLED_TICKET_FORMAT_UNSUPPORTED")
+            try:
+                record = Track1BulkCancelledTicketRecord.model_validate(payload)
+            except Exception as exc:
+                raise InputRejected("INPUT_ROW_INVALID") from exc
+            cancelled: Track1CancelledTicketInput = record.cancelled_ticket
+            scope = scopes.get(cancelled.performance_id.lower())
+            if scope is None or scope.event_id != cancelled.event_id or cancelled.event_id != manifest.event_id:
+                raise InputRejected("CANCELLED_TICKET_SCOPE_MISMATCH")
+            row_no += 1
+            try:
+                db.execute("""
+                    INSERT INTO bulk_cancelled_input_rows
+                      (job_id,row_no,scope,account_hmac,ticket_hmac,seat_zone,seat_row,seat_number,cancelled_at)
+                    VALUES(?,?,?,?,?,?,?,?,?)
+                    """, (job_id, row_no, cancelled.performance_id.lower(), cancelled.account_hmac,
+                          cancelled.ticket_hmac, cancelled.seat_zone, cancelled.seat_row,
+                          cancelled.seat_number, cancelled.cancelled_at.isoformat()))
+            except sqlite3.IntegrityError as exc:
+                raise InputRejected("CANCELLED_TICKET_DUPLICATE") from exc
+            return row_no, True
+        if isinstance(payload, dict) and "recordType" in payload:
+            raise InputRejected("INPUT_ROW_INVALID")
+        try:
+            ticket = Track1LimitTicketInput.model_validate(payload)
+        except Exception as exc:
+            raise InputRejected("INPUT_ROW_INVALID") from exc
+        if manifest.input_format_version == "track1-limit-ndjson-v2" and ticket.ticket_status not in (None, "ACTIVE"):
+            raise InputRejected("CANCELLED_TICKET_MUST_BE_SEPARATE")
         scope = scopes.get(ticket.analysis_scope)
         if scope is None or scope.event_id != ticket.event_id or ticket.event_id != manifest.event_id:
             raise InputRejected("INPUT_SCOPE_MISMATCH")
@@ -341,7 +386,7 @@ class BulkJobRepository:
             token = getattr(ticket, signal)
             if token is not None:
                 db.execute("INSERT OR IGNORE INTO bulk_token_owners(job_id,scope,signal,token,account_id) VALUES(?,?,?,?,?)", (job_id, ticket.analysis_scope, signal, token, ticket.account_id))
-        return row_no
+        return row_no, False
 
     def graph_row_page(self, job_id: str, offset: int, limit: int) -> list[dict]:
         with _connect(self.path) as db:

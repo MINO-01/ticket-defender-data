@@ -120,6 +120,71 @@ class BulkJobRepositoryTests(unittest.TestCase):
             self.repo.ingest(third.job_id, [out_of_scope], self.repo.manifest(third.job_id))
         self.assertEqual(raised.exception.code, "INPUT_SCOPE_MISMATCH")
 
+    def test_cancelled_artifact_rows_are_stored_separately_from_active_analysis_rows(self):
+        from schemas.dto import Track1BulkArtifactManifest, Track1LimitAnalysisRequest
+        from services.track1_scoring import purchase_limit_evaluations
+
+        active = {**row(1), "ticketReference": "active-ticket", "ticketStatus": "ACTIVE"}
+        cancelled = {
+            "recordType": "CANCELLED_TICKET",
+            "cancelledTicket": {
+                "accountHmac": "a" * 64, "ticketHmac": "b" * 64,
+                "eventId": EVENT, "performanceId": PERFORMANCE,
+                "seatZone": "BALCONY", "seatRow": "R1", "seatNumber": "12",
+                "cancelledAt": "2026-11-07T10:00:00Z",
+            },
+        }
+        data = ndjson([active, cancelled])
+        value = manifest(data, inputFormatVersion="track1-limit-ndjson-v2", cancelledTicketRecordCount=1)
+        parsed = Track1BulkArtifactManifest.model_validate(value)
+        accepted = self.repo.create("cancelled-separated", parsed)
+        self.repo.ingest(accepted.job_id, [data], parsed)
+
+        db = sqlite3.connect(self.repo.path)
+        try:
+            self.assertEqual(db.execute("SELECT count(*) FROM bulk_input_rows WHERE job_id=?", (accepted.job_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM bulk_cancelled_input_rows WHERE job_id=?", (accepted.job_id,)).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM bulk_accounts WHERE job_id=?", (accepted.job_id,)).fetchone()[0], 1)
+        finally:
+            db.close()
+
+        scope_payload = [scope.model_dump(mode="json", by_alias=True) for scope in parsed.performance_scopes]
+        base = Track1LimitAnalysisRequest.model_validate({
+            "requestId": "55555555-5555-4555-8555-555555555557",
+            "performanceScopes": scope_payload,
+            "tickets": [active],
+        })
+        with_cancel = Track1LimitAnalysisRequest.model_validate({
+            "requestId": "55555555-5555-4555-8555-555555555558",
+            "performanceScopes": scope_payload,
+            "tickets": [active],
+            "cancelledTickets": [cancelled["cancelledTicket"]],
+        })
+        self.assertEqual(
+            [item.model_dump(mode="json", by_alias=True) for item in purchase_limit_evaluations(base)],
+            [item.model_dump(mode="json", by_alias=True) for item in purchase_limit_evaluations(with_cancel)],
+        )
+
+    def test_cancelled_artifact_count_must_match_manifest(self):
+        from schemas.dto import Track1BulkArtifactManifest
+
+        cancelled = {
+            "recordType": "CANCELLED_TICKET",
+            "cancelledTicket": {
+                "accountHmac": "a" * 64, "ticketHmac": "b" * 64,
+                "eventId": EVENT, "performanceId": PERFORMANCE,
+                "cancelledAt": "2026-11-07T10:00:00Z",
+            },
+        }
+        data = ndjson([row(1), cancelled])
+        parsed = Track1BulkArtifactManifest.model_validate(
+            manifest(data, inputFormatVersion="track1-limit-ndjson-v2", cancelledTicketRecordCount=0)
+        )
+        accepted = self.repo.create("cancelled-count-mismatch", parsed)
+        with self.assertRaises(InputRejected) as raised:
+            self.repo.ingest(accepted.job_id, [data], parsed)
+        self.assertEqual(raised.exception.code, "CANCELLED_TICKET_RECORD_COUNT_MISMATCH")
+
     def test_large_chunk_with_multiple_normal_ndjson_rows_is_accepted(self):
         data = ndjson([row(1), row(2), row(3)])
         accepted = self.create(data, "normal-lines-large-chunk")

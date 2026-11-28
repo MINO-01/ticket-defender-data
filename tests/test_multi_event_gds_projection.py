@@ -3,6 +3,8 @@ from uuid import uuid4
 
 from schemas.multi_event import MultiEventAnalysisRequest
 from services.graph_service import GraphService
+from services.track1_scoring_exp2 import Exp2Graph
+from services.track1_scoring_exp3 import E1Relation, add_e1_relations_to_exp3_graph
 
 
 class _Result:
@@ -44,7 +46,12 @@ class _Session:
             name = parameters["graph_name"]
             edges = parameters["edges"]
             self.project_names.append(name)
-            accounts = sorted({edge["account_index"] for edge in edges})
+            accounts = {edge["account_index"] for edge in edges}
+            accounts.update(
+                edge.get("target_account_index", -1) for edge in edges
+                if edge.get("target_account_index", -1) >= 0
+            )
+            accounts = sorted(accounts)
             nodes = {edge["source"] for edge in edges} | {edge["target"] for edge in edges}
             self.graphs[name] = accounts
             return _Result([{"nodeCount": len(nodes)}])
@@ -110,3 +117,24 @@ def test_multi_event_projects_each_full_performance_scope_separately():
     assert len(set(driver.opened.project_names)) == 2
     assert all(len(groups) == 1 and len(groups[0]) == 2 for groups in communities.values())
     assert algorithm_version == "gds-2.6.6"
+
+
+def test_exp3_gds_projects_cancel_only_account_as_an_e1_candidate_member():
+    relation = E1Relation("tenant-1", "supplier-1", "performance-1", "cancel-only", "reserved", 1, False)
+    graph = add_e1_relations_to_exp3_graph(
+        Exp2Graph((), (), (), {}, ()), [relation], tenant_id="tenant-1",
+        source_system="supplier-1", performance_id="performance-1",
+        analysis_scope="event-1|performance-1",
+    )
+    service = GraphService.__new__(GraphService)
+    driver = _Driver()
+    service.driver = driver
+
+    async def analyze():
+        return await service.analyze_exp3_graph(graph)
+
+    communities, algorithm_version = _run_immediate(analyze())
+
+    assert communities == [frozenset({"cancel-only", "reserved"})]
+    assert algorithm_version == "gds-2.6.6;projection-v3-exp3-continuity-ipwindow-2offset;score-v3-exp3-continuity"
+    assert len(driver.opened.project_names) == 1

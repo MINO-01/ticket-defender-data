@@ -17,6 +17,7 @@ from services.track1_scoring import (
 )
 from services.track1_bulk_jobs import GdsResourceExhausted, JobCancelled
 from services.track1_scoring_exp2 import build_account_token_graph_exp2, PROJECTION_VERSION_EXP2, SCORE_VERSION_EXP2
+from services.track1_scoring_exp3 import Exp3Graph, PROJECTION_VERSION_EXP3, SCORE_VERSION_EXP3
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,85 @@ class GraphService:
                                 logger.error("Multi-event exp2 graph cleanup failed")
                 communities[scope.key] = scope_communities
             return communities, algorithm_version
+
+    async def analyze_exp3_graph(self, graph: Exp3Graph):
+        """Run GDS Louvain on one exp3 graph with account-account E1 edges."""
+
+        async with self.driver.session() as session:
+            try:
+                version_record = await (await session.run("RETURN gds.version() AS version")).single()
+            except Neo4jError:
+                raise GraphAnalysisUnavailable("GDS is unavailable") from None
+            if not version_record or not version_record["version"]:
+                raise GraphAnalysisUnavailable("GDS version is unavailable")
+            algorithm_version = (
+                f"gds-{version_record['version']};{PROJECTION_VERSION_EXP3};{SCORE_VERSION_EXP3}"
+            )
+            if not graph.edges:
+                return [], algorithm_version
+
+            graph_name = f"track1_exp3_{uuid.uuid4().hex}"
+            projection_created = False
+            failure = None
+            try:
+                projection_created = True
+                projected = await session.run(
+                    """
+                    UNWIND $edges AS edge
+                    WITH gds.graph.project(
+                        $graph_name, edge.source, edge.target,
+                        {sourceNodeProperties:{accountIndex:edge.account_index},
+                         targetNodeProperties:{accountIndex:edge.target_account_index},
+                         relationshipType:'SIGNAL',
+                         relationshipProperties:{weight:edge.weight}},
+                        {undirectedRelationshipTypes:['SIGNAL']}
+                    ) AS graph
+                    RETURN graph.nodeCount AS nodeCount
+                    """,
+                    graph_name=graph_name,
+                    edges=list(graph.edges),
+                )
+                projection_record = await projected.single()
+                expected_nodes = len(graph.accounts) + len(graph.tokens)
+                if not projection_record or projection_record["nodeCount"] != expected_nodes:
+                    raise GraphResultInvalid("Incomplete exp3 graph projection")
+
+                result = await session.run(
+                    """
+                    CALL gds.louvain.stream($graph_name, {
+                        relationshipWeightProperty:'weight', concurrency:1
+                    }) YIELD nodeId, communityId
+                    RETURN gds.util.nodeProperty($graph_name,nodeId,'accountIndex') AS accountIndex,
+                           communityId
+                    """,
+                    graph_name=graph_name,
+                )
+                grouped: dict[int, set[str]] = {}
+                account_ids = {account.account_id for account in graph.accounts}
+                async for row in result:
+                    index = _coerce_index(row["accountIndex"])
+                    if 0 <= index < len(graph.accounts):
+                        grouped.setdefault(int(row["communityId"]), set()).add(
+                            graph.accounts[index].account_id,
+                        )
+                seen = set().union(*grouped.values()) if grouped else set()
+                if seen != account_ids:
+                    raise GraphResultInvalid("Incomplete exp3 Louvain result")
+                return [frozenset(members) for members in grouped.values()], algorithm_version
+            except Exception as exc:
+                failure = exc
+                raise
+            finally:
+                if projection_created:
+                    try:
+                        await (await session.run(
+                            "CALL gds.graph.drop($graph_name,false) YIELD graphName RETURN graphName",
+                            graph_name=graph_name,
+                        )).consume()
+                    except Exception:
+                        if failure is None:
+                            raise
+                        logger.error("Exp3 graph cleanup failed")
 
     async def analyze_multi_event_artifact(self, repository, job_id: str, manifest) -> str:
         """Run complete per-performance exp2 Louvain projections from SQLite pages.

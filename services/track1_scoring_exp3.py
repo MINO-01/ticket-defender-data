@@ -1,7 +1,7 @@
 """순수 exp3 계산과 E1/E2/E3 관계 규칙입니다.
 
 이 모듈은 exp2 구현을 변경하거나 활성화하지 않습니다. 원장 sidecar 검증,
-GDS projection 및 API 선택은 입력 계약이 병합된 뒤 별도로 연결해야 합니다.
+GDS 실행 및 API 선택은 입력 계약이 병합된 뒤 별도로 연결해야 합니다.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import math
 import unicodedata
 from typing import Iterable, Mapping, Sequence
 
-from services.track1_scoring_exp2 import QuantityContext
+from services.track1_scoring_exp2 import Exp2Account, Exp2Graph, QuantityContext
 
 
 SCORE_VERSION_EXP3 = "score-v3-exp3-continuity"
@@ -264,6 +264,109 @@ def build_e1_relations(events: Sequence[E1Event]) -> tuple[E1Relation, ...]:
         )
         for key, seat_keys in sorted(seats_by_pair.items())
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Exp3Graph:
+    """exp2 관계와 E1 후보 edge를 담는 exp3 전용 GDS 투영 입력입니다."""
+
+    accounts: tuple[Exp2Account, ...]
+    tokens: tuple[tuple[str, str, str], ...]
+    edges: tuple[dict[str, object], ...]
+    e1_relations: tuple[E1Relation, ...]
+
+
+def add_e1_relations_to_exp3_graph(
+    base_graph: Exp2Graph,
+    relations: Sequence[E1Relation],
+    *,
+    tenant_id: str,
+    source_system: str,
+    performance_id: str,
+    analysis_scope: str,
+) -> Exp3Graph:
+    """기존 exp2 투영에 scope 한정 E1 무방향 edge를 한 번씩 추가합니다.
+
+    E1 방향 근거는 ``e1_relations``에 유지합니다. 같은 무방향 계정 쌍에
+    양방향 근거가 있으면 projection edge 하나에 더 강한 유형 계수를 씁니다.
+    취소 전용 계정도 유효 관계 끝점이면 후보 그래프 노드로 포함합니다.
+    """
+
+    if any(not isinstance(value, str) or not value for value in (
+        tenant_id, source_system, performance_id, analysis_scope,
+    )):
+        raise ValueError("exp3 graph scope identifiers must be non-empty")
+    if any(account.scope != analysis_scope for account in base_graph.accounts):
+        raise ValueError("exp3 base graph contains an unexpected analysis scope")
+
+    selected_by_direction: dict[tuple[str, str], E1Relation] = {}
+    for relation in relations:
+        if (relation.tenant_id, relation.source_system, relation.performance_id) != (
+            tenant_id, source_system, performance_id,
+        ):
+            continue
+        key = (relation.cancelled_by_account, relation.reserved_by_account)
+        previous = selected_by_direction.get(key)
+        if previous is not None and previous != relation:
+            raise ValueError("conflicting E1 relation for the same direction")
+        selected_by_direction[key] = relation
+    selected_relations = tuple(selected_by_direction[key] for key in sorted(selected_by_direction))
+
+    accounts_by_id = {account.account_id: account for account in base_graph.accounts}
+    for relation in selected_relations:
+        for account_id in (relation.cancelled_by_account, relation.reserved_by_account):
+            accounts_by_id.setdefault(account_id, Exp2Account(
+                scope=analysis_scope,
+                account_id=account_id,
+                reservation_nos=(),
+                tokens={},
+            ))
+    accounts = tuple(accounts_by_id[key] for key in sorted(accounts_by_id))
+    account_index = {account.account_id: index for index, account in enumerate(accounts)}
+    tokens = base_graph.tokens
+
+    edges: list[dict[str, object]] = []
+    old_accounts = base_graph.accounts
+    for edge in base_graph.edges:
+        old_account_index = edge.get("account_index")
+        old_target = edge.get("target")
+        if type(old_account_index) is not int or not 0 <= old_account_index < len(old_accounts):
+            raise ValueError("invalid exp2 account edge index")
+        if type(old_target) is not int:
+            raise ValueError("invalid exp2 token edge index")
+        token_index = old_target - len(old_accounts)
+        if not 0 <= token_index < len(tokens):
+            raise ValueError("invalid exp2 token edge index")
+        projected_account_index = account_index[old_accounts[old_account_index].account_id]
+        projected_token_index = len(accounts) + token_index
+        projected = dict(edge)
+        projected.update({
+            "source": projected_account_index,
+            "target": projected_token_index,
+            "account_index": projected_account_index,
+            "target_account_index": -1,
+            "edge_type": "EXP2_SIGNAL",
+        })
+        edges.append(projected)
+
+    pair_weights: dict[tuple[str, str], float] = {}
+    for relation in selected_relations:
+        pair = tuple(sorted((relation.cancelled_by_account, relation.reserved_by_account)))
+        weight = E1_REPEAT_RELIABILITY if relation.repeated else E1_SINGLE_RELIABILITY
+        pair_weights[pair] = max(pair_weights.get(pair, 0.0), weight)
+    for (left, right), weight in sorted(pair_weights.items()):
+        source_index = account_index[left]
+        target_index = account_index[right]
+        edges.append({
+            "source": source_index,
+            "target": target_index,
+            "account_index": source_index,
+            "target_account_index": target_index,
+            "weight": weight,
+            "edge_type": "E1",
+        })
+
+    return Exp3Graph(accounts, tokens, tuple(edges), selected_relations)
 
 
 @dataclass(frozen=True, slots=True)

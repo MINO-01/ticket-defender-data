@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from services.track1_scoring_exp2 import quantity_context
+from services.track1_scoring_exp2 import Exp2Account, Exp2Graph, quantity_context
 from services.track1_scoring_exp3 import (
     E1Event,
     E2Candidate,
@@ -10,6 +10,7 @@ from services.track1_scoring_exp3 import (
     PerformanceScope,
     build_e1_matches,
     build_e1_relations,
+    add_e1_relations_to_exp3_graph,
     e2_hub_excluded,
     e1_coverage,
     e3_ip_window_tokens,
@@ -169,6 +170,53 @@ def test_e1_coverage_deduplicates_accounts_and_prioritizes_repeat_type():
     assert coverage.c1 == pytest.approx(0.25)
     assert coverage.c2 == pytest.approx(0.50)
     assert coverage.link == pytest.approx(0.39875)
+
+
+def test_exp3_projection_adds_one_undirected_e1_edge_and_keeps_direction_evidence():
+    scope = "event-1|performance-1"
+    base = Exp2Graph(
+        accounts=(
+            Exp2Account(scope, "b", ("ticket-b",), {"phone_hash": frozenset({"phone"})}),
+            Exp2Account(scope, "d", ("ticket-d",), {"phone_hash": frozenset({"phone"})}),
+        ),
+        tokens=((scope, "phone_hash", "phone"),),
+        edges=(
+            {"source": 0, "target": 2, "account_index": 0, "weight": 0.7},
+            {"source": 1, "target": 2, "account_index": 1, "weight": 0.7},
+        ),
+        token_damping={},
+        excluded_tokens=(),
+    )
+    relations = (
+        E1Relation("tenant-1", "supplier-1", "performance-1", "b", "a", 1, False),
+        E1Relation("tenant-1", "supplier-1", "performance-1", "a", "b", 2, True),
+        E1Relation("tenant-1", "supplier-1", "performance-1", "d", "cancel-only", 1, False),
+        E1Relation("tenant-2", "supplier-1", "performance-1", "x", "y", 2, True),
+    )
+
+    graph = add_e1_relations_to_exp3_graph(
+        base, relations, tenant_id="tenant-1", source_system="supplier-1",
+        performance_id="performance-1", analysis_scope=scope,
+    )
+
+    assert [account.account_id for account in graph.accounts] == ["a", "b", "cancel-only", "d"]
+    assert graph.edges[:2] == (
+        {"source": 1, "target": 4, "account_index": 1, "weight": 0.7,
+         "target_account_index": -1, "edge_type": "EXP2_SIGNAL"},
+        {"source": 3, "target": 4, "account_index": 3, "weight": 0.7,
+         "target_account_index": -1, "edge_type": "EXP2_SIGNAL"},
+    )
+    e1_edges = [edge for edge in graph.edges if edge["edge_type"] == "E1"]
+    assert e1_edges == [
+        {"source": 0, "target": 1, "account_index": 0, "target_account_index": 1,
+         "weight": 0.70, "edge_type": "E1"},
+        {"source": 2, "target": 3, "account_index": 2, "target_account_index": 3,
+         "weight": 0.30, "edge_type": "E1"},
+    ]
+    assert len(graph.e1_relations) == 3
+    assert {(row.cancelled_by_account, row.reserved_by_account) for row in graph.e1_relations} == {
+        ("b", "a"), ("a", "b"), ("d", "cancel-only"),
+    }
 
 
 def candidate(
